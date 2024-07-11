@@ -210,39 +210,45 @@ function renderGrid(grid) {
         let totalLength = 0;
         let stairwayDistance = 0;
         let spacesOverMaxDistance = [];
+        let spacesWithoutExits = [];
         foundEscapeRoutes.forEach(route => {
-            totalLength = Math.max(totalLength, route.distance);
-            stairwayDistance = Math.max(stairwayDistance, route.distance_to_stair);
-            const isOverMaxDistance = route.distance_to_stair > maxStairDistance;
-            if (isOverMaxDistance){
-                spacesOverMaxDistance.push(route.space_name);
-                outputText.innerHTML.concat("\nSpace: ", route.space_name, "\nDistance to stairway too long: ", route.distance_to_stair, "\nTotal route length: ", route.distance);
-            }
-            ctx.strokeStyle = isOverMaxDistance ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 255, 0, 0.8)';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            route.optimal_path.forEach((point, index) => {
-                if (point[2] === currentFloor) {
-                    const x = (point[1] + 0.5) * cellSize;
-                    const y = (point[0] + 0.5) * cellSize;
-                    if (index === 0) {
-                        ctx.moveTo(x, y);
-                    } else {
-                        ctx.lineTo(x, y);
-                    }
+            if (route.distance){
+                totalLength = Math.max(totalLength, route.distance);
+                stairwayDistance = Math.max(stairwayDistance, route.distance_to_stair);
+                const isOverMaxDistance = route.distance_to_stair > maxStairDistance;
+                if (isOverMaxDistance){
+                    spacesOverMaxDistance.push(route.space_name);
+                    outputText.innerHTML.concat("\nSpace: ", route.space_name, "\nDistance to stairway too long: ", route.distance_to_stair, "\nTotal route length: ", route.distance);
                 }
-            });
-            ctx.stroke();
-
-            // Mark the furthest point
-            const furthestPoint = route.furthest_point;
-            if (furthestPoint[2] === currentFloor) {
-                ctx.fillStyle = 'purple';
-                const x = (furthestPoint[1] + 0.5) * cellSize;
-                const y = (furthestPoint[0] + 0.5) * cellSize;
+                ctx.strokeStyle = isOverMaxDistance ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 255, 0, 0.8)';
+                ctx.lineWidth = 4;
                 ctx.beginPath();
-                ctx.arc(x, y, cellSize * 2, 0, 2 * Math.PI);
-                ctx.fill();
+                route.optimal_path.forEach((point, index) => {
+                    if (point[2] === currentFloor) {
+                        const x = (point[1] + 0.5) * cellSize;
+                        const y = (point[0] + 0.5) * cellSize;
+                        if (index === 0) {
+                            ctx.moveTo(x, y);
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                    }
+                });
+                ctx.stroke();
+
+                // Mark the furthest point
+                const furthestPoint = route.furthest_point;
+                if (furthestPoint[2] === currentFloor) {
+                    ctx.fillStyle = 'purple';
+                    const x = (furthestPoint[1] + 0.5) * cellSize;
+                    const y = (furthestPoint[0] + 0.5) * cellSize;
+                    ctx.beginPath();
+                    ctx.arc(x, y, cellSize * 2, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+            }
+            else{
+                spacesWithoutExits.push(route.space_name);
             }
         });
         const pathLengthsElement = document.getElementById('path-lengths');
@@ -251,6 +257,7 @@ function renderGrid(grid) {
             <p>Longest escape route: ${totalLength.toFixed(2)} meters</p>
             <p>Longest distance to stairway: ${stairwayDistance.toFixed(2)} meters</p>
             <p>Spaces over max stair distance: ${spacesOverMaxDistance.join(', ') || 'None'}</p>
+            <p>Spaces with NO escape route: ${spacesWithoutExits.join(', ') || 'None'}</p>
         `;
     }
 
@@ -289,10 +296,25 @@ function renderSpaces(ctx) {
         if (!spaceColors[space.id]) {
             spaceColors[space.id] = generateRandomColor();
         }
-        
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-        ctx.lineWidth = 2;
-        ctx.fillStyle = spaceColors[space.id];
+        if (foundEscapeRoutes){
+            const route = foundEscapeRoutes.find(r => r.space_name === space.name);
+            if (route && route.distance){
+            
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.lineWidth = 2;
+            ctx.fillStyle = spaceColors[space.id];
+            }
+            else{
+                ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
+                ctx.lineWidth = 2;
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.6)';
+            }
+        }
+        else{
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.lineWidth = 2;
+            ctx.fillStyle = spaceColors[space.id];
+        }
         
         if (!space.polygon || space.polygon.length === 0) {
             console.warn(`Space ${space.id} has no polygon`);
@@ -326,10 +348,15 @@ function renderSpaces(ctx) {
         ctx.fillText(space.name, textX, textY);
         
         if (foundEscapeRoutes) {
-            const route = foundEscapeRoutes.find(r => r.id === space.id);
-            if (route) {
+            foundEscapeRoutes.forEach(r=>console.log(r.space_name, " ", space.name));
+            const route = foundEscapeRoutes.find(r => r.space_name === space.name);
+            if (route && route.distance) {
                 ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
                 ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
+            }
+            else{
+                ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+                ctx.fillText('NO ESCAPE ROUTE FOUND!', textX, textY + 15);
             }
         }
     });

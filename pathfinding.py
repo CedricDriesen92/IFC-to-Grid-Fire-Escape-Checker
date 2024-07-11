@@ -32,22 +32,25 @@ class Pathfinder:
                             n_x, n_y = x + dx, y + dy
                             if 0 <= n_x < len(grid) and 0 <= n_y < len(grid[0]) and grid[n_x][n_y] not in ['wall', 'walla']:
                                 neighbor = (n_x, n_y, floor)
-                                weight = self._get_edge_weight(grid[x][y], is_diagonal=(dx != 0 and dy != 0))
+                                weight = self._get_edge_weight(grid[x][y], neighbor=neighbor, is_diagonal=(dx != 0 and dy != 0))
                                 G.add_edge(node, neighbor, weight=weight)
         
         self._connect_stairs(G)
         
         return G
 
-    def _get_edge_weight(self, cell_type: str, is_diagonal: bool = False) -> float:
+    def _get_edge_weight(self, cell_type: str, neighbor: str = None, is_diagonal: bool = False) -> float:
         if self.minimize_cost:
-            weights = {
-                'empty': 1.0,
-                'floor': 1.0,
-                'door': 4,
-                'stair': 4,
-            }
-            weight = weights.get(cell_type, 1.0)
+            if neighbor and self != neighbor:
+                weights = {
+                    'empty': 1.0,
+                    'floor': 1.0,
+                    'door': 4,
+                    'stair': 4,
+                }
+                weight = weights.get(cell_type, 1.0)
+            else:
+                weight = 1.0
         else:
             weight = 1.0  # All edges have the same weight when minimizing distance
         
@@ -245,6 +248,15 @@ class Pathfinder:
                     'optimal_path': optimal_path,
                     'distance': max_distance * self.grid_size,  # Convert to real-world distance
                     'distance_to_stair': distance_to_stair * self.grid_size,  # Convert to real-world distance
+                    'space_name': space['name']
+                }
+            else:
+                escape_routes[space['id']] = {
+                    'furthest_point': None,
+                    'optimal_exit': None,
+                    'optimal_path': None,
+                    'distance': None,
+                    'distance_to_stair': None,
                     'space_name': space['name']
                 }
 
