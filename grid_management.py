@@ -1,6 +1,9 @@
 import numpy as np
 from typing import List, Dict, Tuple, Any
 import logging
+from shapely.geometry import Polygon, MultiPolygon, MultiPoint
+from shapely.ops import unary_union
+import shapely
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -8,7 +11,6 @@ logger = logging.getLogger(__name__)
 class GridManager:
     def __init__(self, grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float]):
         self.grid_size = grid_size
-        #self.unit_size = unit_size
         self.floors = floors
         self.bbox = bbox
         self.current_floor = 0
@@ -181,6 +183,87 @@ class GridManager:
         return (0 <= floor < len(self.grids) and
                 0 <= row < self.grids[floor].shape[0] and
                 0 <= col < self.grids[floor].shape[1])
+    
+    def detect_spaces(self, include_empty_tiles: bool = False) -> List[Dict[str, Any]]:
+        spaces = []
+        for floor_index, grid in enumerate(self.original_grids):
+            space_id = 0
+            visited = np.zeros_like(grid, dtype=bool)
+            for i in range(grid.shape[0]):
+                for j in range(grid.shape[1]):
+                    if not visited[i, j] and (grid[i, j] == 'floor' or (include_empty_tiles and grid[i, j] == 'empty')):
+                        space_id += 1
+                        space = self._flood_fill(grid, visited, i, j, floor_index, space_id, include_empty_tiles)
+                        if space:
+                            border = self._find_space_borders(grid, space['points'], include_empty_tiles)
+                            volume = len(space['points'])*(self.grid_size ** 2)
+                            area = len(border)*(self.grid_size ** 1)
+                            print("V: " + str(volume) + " area: " + str(area))
+                            if volume > 1:
+                                space['polygon'] = self._create_polygon(border)
+                                spaces.append(space)
+        return spaces
+
+    def _flood_fill(self, grid, visited, i, j, floor_index, space_id, include_empty_tiles):
+        stack = [(i, j)]
+        points = []
+        allowed_types = {'floor', 'empty'} if include_empty_tiles else {'floor'}
+
+        while stack:
+            x, y = stack.pop()
+            if visited[x, y]:
+                continue
+            visited[x, y] = True
+            points.append((x, y))
+
+            for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < grid.shape[0] and 0 <= ny < grid.shape[1]:
+                    if grid[nx, ny] in allowed_types and not visited[nx, ny]:
+                        stack.append((nx, ny))
+
+        if points:
+            return {
+                "id": f"Space_{floor_index}_{space_id}",
+                "name": f"Space {floor_index}_{space_id}",
+                "floor": floor_index,
+                "points": points
+            }
+        return None
+
+    def _find_space_borders(self, grid, points, include_empty_tiles):
+        allowed_types = {'floor', 'empty'} if include_empty_tiles else {'floor'}
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+        points_set = set(points)
+        start_point = min(points)  # Leftmost, then topmost point
+        
+        border = [start_point]
+        current = start_point
+        current_dir = 0  # Start going right
+
+        while True:
+            for _ in range(4):  # Check all 4 directions
+                next_dir = (current_dir - 1) % 4  # Turn left
+                dx, dy = directions[next_dir]
+                next_point = (current[0] + dx, current[1] + dy)
+                
+                if next_point in points_set:
+                    if next_point == start_point and len(border) > 2:
+                        return border  # We've completed the loop
+                    border.append(next_point)
+                    current = next_point
+                    current_dir = next_dir
+                    break
+                current_dir = (current_dir + 1) % 4  # Turn right if we can't go left
+            else:
+                # If we've checked all directions and found nothing, we're done
+                return border
+
+    def _create_polygon(self, border_points):
+        # Convert grid coordinates to world coordinates
+        return [(y * self.grid_size + self.bbox['min_x'], 
+                 x * self.grid_size + self.bbox['min_y']) 
+                for x, y in border_points]
     
     # Helper function to validate input data
 def validate_grid_data(grids, grid_size, floors, bbox):

@@ -4,7 +4,7 @@ import os
 from typing import List, Dict, Tuple, Any
 from ifc_processing import process_ifc_file
 from grid_management import GridManager, validate_grid_data
-from pathfinding import find_path
+from pathfinding import find_path, detect_exits, calculate_escape_routes
 import json
 
 import logging
@@ -38,7 +38,11 @@ def process_file() -> tuple[Dict[str, Any], int]:
         if filename.lower().endswith('.json'):
             with open(filepath, 'r') as f:
                 data = json.load(f)
-            return jsonify(data), 200
+            # Ensure the loaded JSON data has the required structure
+            if validate_json_data(data):
+                return jsonify(data), 200
+            else:
+                return jsonify({'error': 'Invalid JSON structure'}), 400
         else:
             grid_size = float(request.form.get('grid_size', 0.1))
             try:
@@ -52,6 +56,10 @@ def process_file() -> tuple[Dict[str, Any], int]:
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'ifc', 'json'}
+
+def validate_json_data(data):
+    required_keys = ['grids', 'grid_size', 'floors', 'bbox']
+    return all(key in data for key in required_keys)
 
 @app.route('/api/edit-grid', methods=['POST'])
 def edit_grid() -> tuple[Dict[str, Any], int]:
@@ -68,17 +76,20 @@ def edit_grid() -> tuple[Dict[str, Any], int]:
 def find_path_route() -> tuple[Dict[str, Any], int]:
     data = request.json
     try:
-        path, path_length = find_path(
+        path, path_lengths = find_path(
             data['grids'], 
             data['grid_size'], 
             data['floors'], 
             data['bbox'], 
             data['start'], 
             data['goals'],
-            data.get('allow_diagonal', True),
+            data.get('allow_diagonal', False),
             data.get('minimize_cost', True)
         )
-        return jsonify({'path': path, 'path_length': path_length}), 200
+        return jsonify({
+            'path': path, 
+            'path_lengths': path_lengths
+        }), 200
     except Exception as e:
         app.logger.error(f"Error finding path: {str(e)}")
         return jsonify({'error': f'An error occurred while finding the path: {str(e)}'}), 500
@@ -137,6 +148,46 @@ def batch_update_cells():
     except Exception as e:
         app.logger.error(f"Error updating cells: {str(e)}", exc_info=True)
         return jsonify({'error': f'An error occurred while updating cells: {str(e)}'}), 500
+    
+@app.route('/api/detect-exits', methods=['POST'])
+def detect_exits_route() -> tuple[Dict[str, Any], int]:
+    data = request.json
+    try:
+        exits = detect_exits(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        return jsonify({'exits': exits}), 200
+    except Exception as e:
+        app.logger.error(f"Error detecting exits: {str(e)}")
+        return jsonify({'error': f'An error occurred while detecting exits: {str(e)}'}), 500
+    
+@app.route('/api/update-spaces', methods=['POST'])
+def detect_spaces_route() -> tuple[Dict[str, Any], int]:
+    data = request.json
+    try:
+        validate_grid_data(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        spaces = grid_manager.detect_spaces(data.get('include_empty_tiles', False))
+        return jsonify({'spaces': spaces}), 200
+    except Exception as e:
+        app.logger.error(f"Error detecting spaces: {str(e)}", exc_info=True)
+        return jsonify({'error': f'An error occurred while detecting spaces: {str(e)}'}), 500
+    
+@app.route('/api/calculate-escape-routes', methods=['POST'])
+def calculate_escape_routes_route() -> tuple[Dict[str, Any], int]:
+    data = request.json
+    try:
+        escape_routes = calculate_escape_routes(
+            data['grids'], 
+            data['grid_size'], 
+            data['floors'], 
+            data['bbox'], 
+            data['spaces'],
+            data['exits'],
+            data.get('allow_diagonal', False)
+        )
+        return jsonify({'escape_routes': escape_routes}), 200
+    except Exception as e:
+        app.logger.error(f"Error calculating escape routes: {str(e)}")
+        return jsonify({'error': f'An error occurred while calculating escape routes: {str(e)}'}), 500
 
 @app.route('/static/<path:path>')
 def send_static(path: str) -> Any:

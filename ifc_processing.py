@@ -25,6 +25,9 @@ class IFCProcessor:
         self.floors = None
         self.grids = None
         self.unit_size = 1.0
+        self.spaces = []
+        self.global_transform = None
+        self.include_empty_tiles = False
 
     def process(self) -> Dict[str, Any]:
         try:
@@ -33,6 +36,7 @@ class IFCProcessor:
             self.determine_unit_size()
             self.grids = self.create_grids()
             self.process_elements()
+            #self.detect_spaces()
             self.trim_grids()
 
             return {
@@ -40,11 +44,97 @@ class IFCProcessor:
                 'bbox': self.bbox,
                 'floors': self.floors,
                 'grid_size': self.grid_size,
-                'unit_size': self.unit_size
+                'unit_size': self.unit_size,
+                'spaces': self.spaces
             }
         except Exception as e:
             logger.error(f"Error processing IFC file: {str(e)}")
             logger.error(traceback.format_exc())
+
+    def detect_spaces(self):
+        self.spaces = []
+        for floor_index, grid in enumerate(self.grids):
+            space_id = 0
+            visited = np.zeros_like(grid, dtype=bool)
+            for i in range(grid.shape[0]):
+                for j in range(grid.shape[1]):
+                    if not visited[i, j] and (grid[i, j] == 'floor' or (self.include_empty_tiles and grid[i, j] == 'empty')):
+                        space_id += 1
+                        self.flood_fill(grid, visited, i, j, floor_index, space_id)
+
+    def flood_fill(self, grid, visited, i, j, floor_index, space_id):
+        stack = [(i, j)]
+        points = []
+        while stack:
+            x, y = stack.pop()
+            if visited[x, y]:
+                continue
+            visited[x, y] = True
+            points.append((x, y))
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < grid.shape[0] and 0 <= ny < grid.shape[1]:
+                    if not visited[nx, ny] and (grid[nx, ny] == 'floor' or (self.include_empty_tiles and grid[nx, ny] == 'empty')):
+                        stack.append((nx, ny))
+        
+        if points:
+            min_x = min(p[1] for p in points)
+            max_x = max(p[1] for p in points)
+            min_y = min(p[0] for p in points)
+            max_y = max(p[0] for p in points)
+            self.spaces.append({
+                "id": f"Space_{floor_index}_{space_id}",
+                "name": f"Space {space_id}",
+                "floor": floor_index,
+                "bounds": {
+                    "min_x": min_x * self.grid_size + self.bbox['min_x'],
+                    "max_x": (max_x + 1) * self.grid_size + self.bbox['min_x'],
+                    "min_y": min_y * self.grid_size + self.bbox['min_y'],
+                    "max_y": (max_y + 1) * self.grid_size + self.bbox['min_y']
+                },
+                "points": points
+            })
+
+    def set_include_empty_tiles(self, include: bool):
+        self.include_empty_tiles = include
+        self.detect_spaces()
+
+
+    def extract_spaces(self):
+        settings = ifcopenshell.geom.settings()
+        settings.set(settings.USE_WORLD_COORDS, True)
+
+        for space in self.ifc_file.by_type("IfcSpace"):
+            try:
+                shape = ifcopenshell.geom.create_shape(settings, space)
+                verts = shape.geometry.verts
+                faces = shape.geometry.faces
+                
+                space_info = {
+                    "id": space.GlobalId,
+                    "name": space.Name,
+                    "points": self.extract_2d_points(verts, faces),
+                    "floor": self.determine_space_floor(verts)
+                }
+                self.spaces.append(space_info)
+            except Exception as e:
+                logger.warning(f"Failed to process space {space.GlobalId}: {str(e)}")
+
+    def extract_2d_points(self, verts, faces):
+        points = []
+        for i in range(0, len(verts), 3):
+            x = (verts[i] - self.bbox['min_x']) / self.grid_size
+            y = (verts[i+1] - self.bbox['min_y']) / self.grid_size
+            points.append((x, y))
+        return list(set(points))  # Remove duplicates
+
+    def determine_space_floor(self, verts):
+        z_coords = verts[2::3]
+        avg_z = sum(z_coords) / len(z_coords)
+        for i, floor in enumerate(self.floors):
+            if floor["elevation"] <= avg_z < floor["elevation"] + floor["height"]:
+                return i
+        return -1  # If no matching floor is found
 
     def determine_unit_size(self):
         x_size = self.bbox['max_x'] - self.bbox['min_x']

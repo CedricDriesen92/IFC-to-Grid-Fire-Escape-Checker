@@ -23,6 +23,11 @@ let animationInterval = null;
 let pathData = null;
 let allowDiagonal = true;
 let minimizeCost = true;
+let spacesData = [];
+let includeEmptyTiles = false;
+let foundEscapeRoutes = null;
+let spaceColors = {};
+let maxStairDistance = 30;
 
 // DOM elements
 const gridContainer = document.getElementById('grid-container');
@@ -36,6 +41,11 @@ const wallBufferSlider = document.getElementById('wall-buffer');
 const allowDiagonalCheckbox = document.getElementById('allow-diagonal');
 const minimizeCostCheckbox = document.getElementById('minimize-cost');
 const exportPathButton = document.getElementById('export-path');
+const detectExitsButton = document.getElementById('detect-exits');
+const spaceDetectionButton = document.getElementById('update-spaces');
+const maxStairDistanceSlider = document.getElementById('max-stair-distance');
+const maxStairDistanceDisplay = document.getElementById('max-stair-distance-display');
+const outputText = document.getElementById('result');
 
 // Event listeners
 fileUploadForm.addEventListener('submit', uploadFile);
@@ -46,6 +56,8 @@ gridContainer.addEventListener('mousedown', handleMouseDown);
 gridContainer.addEventListener('mousemove', handleMouseMove);
 gridContainer.addEventListener('mouseup', handleMouseUp);
 gridContainer.addEventListener('mouseleave', handleMouseLeave);
+gridContainer.addEventListener('mousemove', handleGridHover);
+gridContainer.addEventListener('mouseout', handleGridMouseOut);
 gridContainer.addEventListener('dragstart', (e) => e.preventDefault());
 allowDiagonalCheckbox.addEventListener('change', (e) => {
 allowDiagonal = e.target.checked;
@@ -55,6 +67,12 @@ minimizeCostCheckbox.addEventListener('change', (e) => {
 });
 exportPathButton.addEventListener('click', exportPath);
 gridContainer.addEventListener('contextmenu', (e) => e.preventDefault());
+detectExitsButton.addEventListener('click', detectExits);
+document.getElementById('include-empty-tiles').addEventListener('change', (e) => {
+    includeEmptyTiles = e.target.checked;
+});
+spaceDetectionButton.addEventListener('click', updateSpaces);
+maxStairDistanceSlider.addEventListener('input', handleMaxStairDistanceChange);
 
 document.getElementById('draw-wall').addEventListener('click', () => setCurrentType('wall'));
 document.getElementById('draw-door').addEventListener('click', () => setCurrentType('door'));
@@ -71,6 +89,7 @@ document.getElementById('set-start').addEventListener('click', () => setCurrentT
 document.getElementById('set-goal').addEventListener('click', () => setCurrentType('goal'));
 document.getElementById('find-path').addEventListener('click', findPath);
 document.getElementById('download-grid').addEventListener('click', downloadGrid);
+document.getElementById('calculate-escape-routes').addEventListener('click', calculateEscapeRoutes);
 
 
 
@@ -91,6 +110,7 @@ async function uploadFile(event) {
         }
 
         const result = await response.json();
+        console.log('Received data from server:', result);
         handleProcessedData(result);
     } catch (error) {
         console.error('Error:', error);
@@ -103,24 +123,48 @@ async function uploadFile(event) {
 function handleProcessedData(data) {
     originalGridData = data;
     bufferedGridData = {...data};
-    originalGridData.grid_size *= originalGridData.unit_size;
-    bufferedGridData.grid_size *= bufferedGridData.unit_size;
+    spacesData = data.spaces || [];
+    console.log('Loaded spaces data:', spacesData);
+    
+    if (typeof originalGridData.grid_size === 'number') {
+        originalGridData.grid_size *= originalGridData.unit_size || 1;
+        bufferedGridData.grid_size *= bufferedGridData.unit_size || 1;
+        console.log('Adjusted grid size:', bufferedGridData.grid_size);
+    } else {
+        console.error('Invalid grid_size in loaded data:', originalGridData.grid_size);
+        showError('Invalid grid size in loaded data');
+        return;
+    }
+
+    if (!Array.isArray(originalGridData.grids) || originalGridData.grids.length === 0) {
+        console.error('Invalid grids data in loaded file:', originalGridData.grids);
+        showError('Invalid grids data in loaded file');
+        return;
+    }
+
+    console.log('Grid data seems valid, initializing grid...');
     initializeGrid();
     showGridEditor();
 }
 
 function initializeGrid() {
+    console.log('Initializing grid...');
     const containerWidth = gridContainer.clientWidth;
     const containerHeight = gridContainer.clientHeight;
+    console.log('Container dimensions:', containerWidth, containerHeight);
+
     const gridWidth = bufferedGridData.grids[0][0].length;
     const gridHeight = bufferedGridData.grids[0].length;
+    console.log('Grid dimensions:', gridWidth, gridHeight);
 
     const horizontalZoom = containerWidth / gridWidth;
     const verticalZoom = containerHeight / gridHeight;
     minZoom = Math.min(horizontalZoom, verticalZoom);
+    console.log('Calculated zoom levels:', horizontalZoom, verticalZoom, minZoom);
 
-    zoomLevel = 2000//Math.max(100, Math.min(25000, Math.round(minZoom * 100)));
+    zoomLevel = 20*Math.max(100, Math.min(25000, Math.round(minZoom * 100)));
     cellSize = (zoomLevel / 100) * bufferedGridData.grid_size;
+    console.log('Set zoom level and cell size:', zoomLevel, cellSize);
 
     zoomSlider.value = zoomLevel;
     updateZoomLevel();
@@ -129,12 +173,16 @@ function initializeGrid() {
 }
 
 function renderGrid(grid) {
+    //console.log('Rendering grid for floor:', currentFloor);
+    //console.log('Grid data:', grid);
+    
     gridContainer.innerHTML = '';
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
 
     canvas.width = grid[0].length * cellSize;
     canvas.height = grid.length * cellSize;
+    //console.log('Canvas dimensions:', canvas.width, canvas.height);
 
     // Render the base grid
     grid.forEach((row, i) => {
@@ -144,8 +192,12 @@ function renderGrid(grid) {
         });
     });
 
+    // Render IFC spaces
+    renderSpaces(ctx);
+
     // Render path if it exists
     if (pathData) {
+        console.log(pathData);
         ctx.fillStyle = 'rgba(255, 255, 0, 0.5)';
         pathData.forEach(point => {
             if (point[2] === currentFloor) {
@@ -153,6 +205,55 @@ function renderGrid(grid) {
             }
         });
     }
+
+    if (foundEscapeRoutes) {
+        let totalLength = 0;
+        let stairwayDistance = 0;
+        let spacesOverMaxDistance = [];
+        foundEscapeRoutes.forEach(route => {
+            totalLength = Math.max(totalLength, route.distance);
+            stairwayDistance = Math.max(stairwayDistance, route.distance_to_stair);
+            const isOverMaxDistance = route.distance_to_stair > maxStairDistance;
+            if (isOverMaxDistance){
+                spacesOverMaxDistance.push(route.space_name);
+                outputText.innerHTML.concat("\nSpace: ", route.space_name, "\nDistance to stairway too long: ", route.distance_to_stair, "\nTotal route length: ", route.distance);
+            }
+            ctx.strokeStyle = isOverMaxDistance ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 255, 0, 0.8)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            route.optimal_path.forEach((point, index) => {
+                if (point[2] === currentFloor) {
+                    const x = (point[1] + 0.5) * cellSize;
+                    const y = (point[0] + 0.5) * cellSize;
+                    if (index === 0) {
+                        ctx.moveTo(x, y);
+                    } else {
+                        ctx.lineTo(x, y);
+                    }
+                }
+            });
+            ctx.stroke();
+
+            // Mark the furthest point
+            const furthestPoint = route.furthest_point;
+            if (furthestPoint[2] === currentFloor) {
+                ctx.fillStyle = 'purple';
+                const x = (furthestPoint[1] + 0.5) * cellSize;
+                const y = (furthestPoint[0] + 0.5) * cellSize;
+                ctx.beginPath();
+                ctx.arc(x, y, cellSize * 2, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+        });
+        const pathLengthsElement = document.getElementById('path-lengths');
+        pathLengthsElement.innerHTML = `
+            <h3>Escape Route Lengths:</h3>
+            <p>Longest escape route: ${totalLength.toFixed(2)} meters</p>
+            <p>Longest distance to stairway: ${stairwayDistance.toFixed(2)} meters</p>
+            <p>Spaces over max stair distance: ${spacesOverMaxDistance.join(', ') || 'None'}</p>
+        `;
+    }
+
 
     // Render start point if it exists and is on the current floor
     if (start && start.floor === currentFloor) {
@@ -176,45 +277,92 @@ function renderGrid(grid) {
 
 
     gridContainer.appendChild(canvas);
+    //console.log('Grid rendered and appended to container');
 }
 
-function renderGridWithPathfinding(grid, step) {
-    const canvas = gridContainer.querySelector('canvas');
-    if (!canvas) {
-        renderGrid(grid);
-        return;
+function renderSpaces(ctx) {
+    const currentFloorSpaces = spacesData.filter(space => space.floor === currentFloor);
+
+    console.log('Rendering spaces for floor:', currentFloor, ' number: ', currentFloorSpaces.length);
+    
+    currentFloorSpaces.forEach((space, index) => {
+        if (!spaceColors[space.id]) {
+            spaceColors[space.id] = generateRandomColor();
+        }
+        
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+        ctx.lineWidth = 2;
+        ctx.fillStyle = spaceColors[space.id];
+        
+        if (!space.polygon || space.polygon.length === 0) {
+            console.warn(`Space ${space.id} has no polygon`);
+            return;
+        }
+
+        ctx.beginPath();
+        space.polygon.forEach((point, i) => {
+            const x = ((point[0] - bufferedGridData.bbox.min_x) / bufferedGridData.grid_size + 0.5) * cellSize;
+            const y = ((point[1] - bufferedGridData.bbox.min_y) / bufferedGridData.grid_size + 0.5) * cellSize;
+            if (i === 0) {
+                ctx.moveTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
+            }
+        });
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // Render space name and path lengths
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.font = '12px Arial';
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const centerX = space.polygon.reduce((sum, p) => sum + p[0], 0) / space.polygon.length;
+        const centerY = space.polygon.reduce((sum, p) => sum + p[1], 0) / space.polygon.length;
+        const textX = ((centerX - bufferedGridData.bbox.min_x) / bufferedGridData.grid_size + 0.5) * cellSize;
+        const textY = ((centerY - bufferedGridData.bbox.min_y) / bufferedGridData.grid_size + 0.5) * cellSize;
+        
+        ctx.fillText(space.name, textX, textY);
+        
+        if (foundEscapeRoutes) {
+            const route = foundEscapeRoutes.find(r => r.id === space.id);
+            if (route) {
+                ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
+                ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
+            }
+        }
+    });
+}
+
+
+async function updateSpaces() {
+    try {
+        const response = await fetch('/api/update-spaces', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                include_empty_tiles: includeEmptyTiles,
+                grids: bufferedGridData.grids,
+                grid_size: bufferedGridData.grid_size,
+                floors: bufferedGridData.floors,
+                bbox: bufferedGridData.bbox,
+            })
+        });
+        const data = await response.json();
+        if (response.ok) {
+            spacesData = data.spaces;
+            renderGrid(bufferedGridData.grids[currentFloor]);
+            //showMessage('Spaces updated successfully');
+        } else {
+            showError(`Space update error: ${data.error}`);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showError(`An error occurred while updating spaces: ${error.message}`);
     }
-    const ctx = canvas.getContext('2d');
-
-    // Clear the canvas
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Render the base grid
-    renderGrid(grid);
-
-    // Render open set
-    ctx.fillStyle = 'rgba(0, 255, 0, 0.3)';
-    step.open_set.forEach(([x, y, floor]) => {
-        if (floor === currentFloor) {
-            ctx.fillRect(y * cellSize, x * cellSize, cellSize, cellSize);
-        }
-    });
-
-    // Render closed set
-    ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
-    step.closed_set.forEach(([x, y, floor]) => {
-        if (floor === currentFloor) {
-            ctx.fillRect(y * cellSize, x * cellSize, cellSize, cellSize);
-        }
-    });
-
-    // Render current path
-    ctx.fillStyle = 'rgba(0, 0, 255, 0.5)';
-    step.current_path.forEach(([x, y, floor]) => {
-        if (floor === currentFloor) {
-            ctx.fillRect(y * cellSize, x * cellSize, cellSize, cellSize);
-        }
-    });
 }
 
 function getCellColor(cellType) {
@@ -265,6 +413,61 @@ function handleMouseUp() {
 
 function handleMouseLeave() {
     stopPainting();
+}
+
+function handleGridHover(e) {
+    const { row, col } = getCellCoordinates(e);
+    const space = spacesData.find(s => s.floor === currentFloor && isPointInPolygon(row, col, s.polygon));
+    if (space && foundEscapeRoutes) {
+        const route = foundEscapeRoutes.find(r => r.id === space.id);
+        if (route) {
+            highlightPath(route.optimal_path);
+        }
+    }
+}
+
+function handleGridMouseOut() {
+    renderGrid(bufferedGridData.grids[currentFloor]);
+}
+
+function isPointInPolygon(x, y, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+        const xi = (polygon[i][0] - bufferedGridData.bbox.min_x) / bufferedGridData.grid_size;
+        const yi = (polygon[i][1] - bufferedGridData.bbox.min_y) / bufferedGridData.grid_size;
+        const xj = (polygon[j][0] - bufferedGridData.bbox.min_x) / bufferedGridData.grid_size;
+        const yj = (polygon[j][1] - bufferedGridData.bbox.min_y) / bufferedGridData.grid_size;
+
+        const intersect = ((yi > y) !== (yj > y))
+            && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
+
+function highlightPath(path) {
+    const canvas = gridContainer.querySelector('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    // Redraw the grid
+    renderGrid(bufferedGridData.grids[currentFloor]);
+    
+    // Highlight the path
+    ctx.strokeStyle = 'rgba(255, 255, 0, 0.8)';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    path.forEach((point, index) => {
+        if (point[2] === currentFloor) {
+            const x = (point[1] + 0.5) * cellSize;
+            const y = (point[0] + 0.5) * cellSize;
+            if (index === 0) {
+                ctx.moveTo(x, y);
+            } else {
+                ctx.lineTo(x, y);
+            }
+        }
+    });
+    ctx.stroke();
 }
 
 function startPainting(row, col) {
@@ -546,7 +749,7 @@ async function findPath() {
         const data = await response.json();
         if (response.ok) {
             pathData = data.path;
-            displayPathResult(data.path_length);
+            displayPathResult(data.path_lengths);
             renderGrid(bufferedGridData.grids[currentFloor]);
         } else {
             showError(`Pathfinding error: ${data.error}`);
@@ -557,8 +760,20 @@ async function findPath() {
     }
 }
 
-function displayPathResult(pathLength) {
-    document.getElementById('result').innerHTML = `Path length: ${pathLength.toFixed(2)} meters`;
+function displayPathResult(pathLengths) {
+    let resultHTML = `<h3>Path Lengths:</h3>
+                      <p>Total length: ${pathLengths.total_length.toFixed(2)} meters</p>
+                      <p>Distance to stairway: ${pathLengths.stairway_distance.toFixed(2)} meters</p>
+                      <h4>Floor-wise lengths:</h4>
+                      <ul>`;
+    
+    for (const [floor, length] of Object.entries(pathLengths.floor_lengths)) {
+        resultHTML += `<li>Floor ${parseInt(floor.split('_')[1]) + 1}: ${length.toFixed(2)} meters</li>`;
+    }
+    
+    resultHTML += '</ul>';
+    
+    document.getElementById('result').innerHTML = resultHTML;
 }
 
 function highlightPath(path) {
@@ -588,6 +803,77 @@ function highlightPath(path) {
             ctx.fill();
         }
     });
+}
+
+async function calculateEscapeRoutes() {
+    if (!spacesData || spacesData.length === 0 || !goals || goals.length === 0) {
+        showError('Please generate spaces and set exits before calculating escape routes.');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/calculate-escape-routes', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                grids: bufferedGridData.grids,
+                grid_size: bufferedGridData.grid_size,
+                floors: bufferedGridData.floors,
+                bbox: bufferedGridData.bbox,
+                spaces: spacesData,
+                exits: goals.map(goal => [goal.row, goal.col, goal.floor]),
+                allow_diagonal: allowDiagonal
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log(data.escape_routes);
+        foundEscapeRoutes = Object.values(data.escape_routes);
+        renderGrid(bufferedGridData.grids[currentFloor]);
+    
+        // Display path lengths
+        let totalLength = 0;
+        let stairwayDistance = 0;
+        let spacesOverMaxDistance = [];
+        foundEscapeRoutes.forEach(route => {
+            totalLength = Math.max(totalLength, route.distance);
+            stairwayDistance = Math.max(stairwayDistance, route.distance_to_stair || 0);
+            if (route.distance_to_stair > maxStairDistance) {
+                spacesOverMaxDistance.push(route.id);
+            }
+        });
+    
+        const pathLengthsElement = document.getElementById('path-lengths');
+        pathLengthsElement.innerHTML = `
+            <h3>Escape Route Lengths:</h3>
+            <p>Longest escape route: ${totalLength.toFixed(2)} meters</p>
+            <p>Longest distance to stairway: ${stairwayDistance.toFixed(2)} meters</p>
+            <p>Spaces over max stair distance: ${spacesOverMaxDistance.join(', ') || 'None'}</p>
+        `;
+    
+    } catch (error) {
+        console.error('Error:', error);
+        showError(`An error occurred while calculating escape routes: ${error.message}`);
+    }
+}
+
+function handleMaxStairDistanceChange(e) {
+    maxStairDistance = parseInt(e.target.value);
+    maxStairDistanceDisplay.textContent = `${maxStairDistance} m`;
+    if (foundEscapeRoutes) {
+        renderGrid(bufferedGridData.grids[currentFloor]);
+    }
+}
+
+function generateRandomColor() {
+    const hue = Math.floor(Math.random() * 360);
+    return `hsl(${hue}, 70%, 80%)`;
 }
 
 function updateBufferForPaintedCells() {
@@ -695,13 +981,32 @@ async function batchUpdateCells(updates) {
     }
 }
 
-function handleProcessedData(data) {
-    originalGridData = data;
-    bufferedGridData = {...data};
-    originalGridData.grid_size *= originalGridData.unit_size;
-    bufferedGridData.grid_size *= bufferedGridData.unit_size;
-    initializeGrid();
-    showGridEditor();
+async function detectExits() {
+    try {
+        const response = await fetch('/api/detect-exits', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                grids: bufferedGridData.grids,
+                grid_size: bufferedGridData.grid_size,
+                floors: bufferedGridData.floors,
+                bbox: bufferedGridData.bbox
+            })
+        });
+        const data = await response.json();
+        if (response.ok) {
+            goals = data.exits.map(exit => ({ row: exit[0], col: exit[1], floor: exit[2] }));
+            renderGrid(bufferedGridData.grids[currentFloor]);
+            //showMessage('Exits detected and added as goals.');
+        } else {
+            showError(`Exit detection error: ${data.error}`);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showError(`An error occurred while detecting exits: ${error.message}`);
+    }
 }
 
 function handleZoomChange(e) {
@@ -754,6 +1059,11 @@ function hideProgress() {
 function showError(message) {
     console.error(message);
     alert(message);  // You can replace this with a more sophisticated error display method
+}
+
+function showMessage(message) {
+    console.log(message);
+    alert(message);  // You can replace this with a more sophisticated message display method
 }
 
 function downloadGrid() {
@@ -814,7 +1124,15 @@ function exportPath() {
         // Draw floor label
         ctx.fillStyle = 'black';
         ctx.font = '16px Arial';
-        ctx.fillText(`Floor ${parseInt(floor) + 1}`, padding, yOffset + 20);
+        const pathLengths = JSON.parse(document.getElementById('result').getAttribute('data-path-lengths'));
+        let yPosition = canvas.height - padding;
+        ctx.fillText(`Total path length: ${pathLengths.total_length.toFixed(2)} meters`, padding, yPosition);
+        yPosition -= 20;
+        ctx.fillText(`Distance to stairway: ${pathLengths.stairway_distance.toFixed(2)} meters`, padding, yPosition);
+        for (const [floor, length] of Object.entries(pathLengths.floor_lengths)) {
+            yPosition -= 20;
+            ctx.fillText(`Floor ${parseInt(floor.split('_')[1]) + 1} length: ${length.toFixed(2)} meters`, padding, yPosition);
+        }    
 
         // Draw grid
         bufferedGridData.grids[floor].forEach((row, i) => {

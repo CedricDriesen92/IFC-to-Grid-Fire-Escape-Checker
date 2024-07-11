@@ -70,7 +70,7 @@
                 <input type="range" id="brush-size" min="1" max="10" value="1" step="1" class="mr-2">
                 <span id="brush-size-display">1</span>
             </div>
-            <div id="grid-container" class="border border-gray-300 p-2"></div>
+            <div id="grid-container" class="p-2"></div>
             <button id="download-grid" class="bg-green-500 text-white px-4 py-2 rounded mt-2">Download Grid</button>
         </div>
 
@@ -78,7 +78,14 @@
             <h2 class="text-xl font-bold mb-2">Pathfinder</h2>
             <button id="set-start" class="bg-green-500 text-white px-4 py-2 rounded mr-2">Set Start</button>
             <button id="set-goal" class="bg-red-500 text-white px-4 py-2 rounded mr-2">Set Goal</button>
+            <button id="detect-exits"class="bg-red-400 text-white px-4 py-2 rounded mr-2">Detect Exits</button>
             <button id="find-path" class="bg-blue-500 text-white px-4 py-2 rounded">Find Path</button>
+            <button id="calculate-escape-routes" class="bg-pink-500 text-white px-4 py-2 rounded">Calculate Routes</button>
+            <div>
+                <input type="checkbox" id="include-empty-tiles">
+                <label for="include-empty-tiles">Include empty tiles in spaces</label>
+                <button id="update-spaces" class="bg-blue-500 text-white px-4 py-2 rounded">Update Spaces</button>
+            </div>
             <div>
                 <input type="checkbox" id="allow-diagonal" name="allow-diagonal" checked>
                 <label for="allow-diagonal">Allow Diagonal Movement</label>
@@ -87,10 +94,16 @@
                 <input type="checkbox" id="minimize-cost" name="minimize-cost" checked>
                 <label for="minimize-cost">Minimize Cost? (uncheck: distance)</label>
             </div>
+            <div>
+                <label for="max-stair-distance">Max Stair Distance:</label>
+                <input type="range" id="max-stair-distance" min="0" max="100" value="30" step="1">
+                <span id="max-stair-distance-display">30 m</span>
+            </div>
             <button id="export-path" class="bg-green-500 text-white px-4 py-2 rounded mr-2">Export Path</button>
         </div>
 
-        <div id="result" class="mt-4"></div>
+        <div id="result"></div>
+        <div id="path-lengths"></div>
     </div>
 
     <script src="/static/js/main.js"></script>
