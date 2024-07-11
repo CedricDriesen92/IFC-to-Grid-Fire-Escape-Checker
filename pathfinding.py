@@ -106,60 +106,58 @@ class Pathfinder:
         }
 
     def detect_exits(self) -> List[Tuple[int, int, int]]:
-        exits = set()
+        exits = []
         for floor_index, floor in enumerate(self.grids):
-            rows, cols = len(floor), len(floor[0])
-            for i in range(rows):
-                for j in range(cols):
-                    if floor[i][j] == 'door':
-                        if self._is_exit(floor, i, j):
-                            exits.add((i, j, floor_index))
+            door_groups = self._group_connected_doors(floor)
+            for door_group in door_groups:
+                if self._is_exit_group(floor, door_group):
+                    exit_coords = self._calculate_average_position(door_group, floor_index)
+                    exits.append(exit_coords)
+        return exits
 
-        return list(self._filter_exits(exits))
-
-    def _is_exit(self, floor: List[List[str]], x: int, y: int) -> bool:
-        directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+    def _group_connected_doors(self, floor: List[List[str]]) -> List[List[Tuple[int, int]]]:
         rows, cols = len(floor), len(floor[0])
-
-        for dx, dy in directions:
-            nx1, ny1 = x + dx, y + dy
-            while 0 <= nx1 < rows and 0 <= ny1 < cols:
-                if floor[nx1][ny1] in ['wall', 'door']:
-                    break
-                if nx1 == 0 or nx1 == rows - 1 or ny1 == 0 or ny1 == cols - 1:
-                    return True
-                nx1, ny1 = nx1 + dx, ny1 + dy
-
-        return False
-
-    def _filter_exits(self, exits: set) -> set:
-        filtered = set()
-        for exit in exits:
-            if not any(self._are_connected_by_doors(exit, existing) for existing in filtered):
-                filtered.add(exit)
-        return filtered
-
-    def _are_connected_by_doors(self, pos1: Tuple[int, int, int], pos2: Tuple[int, int, int]) -> bool:
-        if pos1[2] != pos2[2]:  # Different floors
-            return False
-
-        floor = self.grids[pos1[2]]
         visited = set()
-        queue = [(pos1[0], pos1[1])]
+        door_groups = []
 
-        while queue:
-            x, y = queue.pop(0)
-            if (x, y) == (pos2[0], pos2[1]):
-                return True
-
+        def dfs(x, y, group):
+            if (x, y) in visited or not (0 <= x < rows and 0 <= y < cols) or floor[x][y] != 'door':
+                return
+            visited.add((x, y))
+            group.append((x, y))
             for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-                nx1, ny1 = x + dx, y + dy
-                if 0 <= nx1 < len(floor) and 0 <= ny1 < len(floor[0]) and (nx1, ny1) not in visited and floor[nx1][ny1] == 'door':
-                    visited.add((nx1, ny1))
-                    queue.append((nx1, ny1))
+                dfs(x + dx, y + dy, group)
+
+        for i in range(rows):
+            for j in range(cols):
+                if floor[i][j] == 'door' and (i, j) not in visited:
+                    group = []
+                    dfs(i, j, group)
+                    door_groups.append(group)
+
+        return door_groups
+
+    def _is_exit_group(self, floor: List[List[str]], door_group: List[Tuple[int, int]]) -> bool:
+        rows, cols = len(floor), len(floor[0])
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+
+        for x, y in door_group:
+            for dx, dy in directions:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < rows and 0 <= ny < cols and floor[nx][ny] not in ['wall', 'door']:
+                    while 0 <= nx < rows and 0 <= ny < cols:
+                        if floor[nx][ny] in ['wall', 'door']:
+                            break
+                        if nx == 0 or nx == rows - 1 or ny == 0 or ny == cols - 1:
+                            return True
+                        nx, ny = nx + dx, ny + dy
 
         return False
 
+    def _calculate_average_position(self, door_group: List[Tuple[int, int]], floor_index: int) -> Tuple[int, int, int]:
+        avg_x = sum(x for x, _ in door_group) / len(door_group)
+        avg_y = sum(y for _, y in door_group) / len(door_group)
+        return (round(avg_x), round(avg_y), floor_index)
 
     def find_path(self, start: Dict[str, int], goals: List[Dict[str, int]]) -> Tuple[List[Tuple[int, int, int]], Dict[str, float]]:
         start_node = (start['row'], start['col'], start['floor'])
