@@ -1,0 +1,5 @@
+Flask==3.0.3
+ifcopenshell==0.7.0.240627
+networkx==3.3
+numpy==1.24.2
+Werkzeug==3.0.3

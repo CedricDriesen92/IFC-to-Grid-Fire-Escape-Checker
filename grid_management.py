@@ -1,9 +1,6 @@
 import numpy as np
 from typing import List, Dict, Tuple, Any
 import logging
-from shapely.geometry import Polygon, MultiPolygon, MultiPoint
-from shapely.ops import unary_union
-import shapely
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
