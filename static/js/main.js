@@ -299,15 +299,19 @@ function renderSpaces(ctx) {
         if (foundEscapeRoutes){
             const route = foundEscapeRoutes.find(r => r.space_name === space.name);
             if (route && route.distance){
-            
-            ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-            ctx.lineWidth = 2;
-            ctx.fillStyle = spaceColors[space.id];
+                ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.lineWidth = 2;
+                ctx.fillStyle = spaceColors[space.id];
             }
-            else{
+            else if(route){
                 ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
                 ctx.lineWidth = 2;
                 ctx.fillStyle = 'rgba(255, 0, 0, 0.6)';
+            }
+            else{
+                ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.lineWidth = 2;
+                ctx.fillStyle = spaceColors[space.id];
             }
         }
         else{
@@ -354,9 +358,12 @@ function renderSpaces(ctx) {
                 ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
                 ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
             }
-            else{
+            else if(route){
                 ctx.fillStyle = 'rgba(0, 0, 0, 1)';
                 ctx.fillText('NO ESCAPE ROUTE FOUND!', textX, textY + 15);
+            }    
+            else{
+                ctx.fillText('Waiting for result...', textX, textY + 15);
             }
         }
     });
@@ -838,56 +845,75 @@ async function calculateEscapeRoutes() {
         return;
     }
 
-    try {
-        const response = await fetch('/api/calculate-escape-routes', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                grids: bufferedGridData.grids,
-                grid_size: bufferedGridData.grid_size,
-                floors: bufferedGridData.floors,
-                bbox: bufferedGridData.bbox,
-                spaces: spacesData,
-                exits: goals.map(goal => [goal.row, goal.col, goal.floor]),
-                allow_diagonal: allowDiagonal
-            })
-        });
+    foundEscapeRoutes = [];
+    let totalLength = 0;
+    let stairwayDistance = 0;
+    let spacesOverMaxDistance = [];
+    let spacesWithoutExits = [];
 
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
+    showProgress('Calculating escape routes...');
 
-        const data = await response.json();
-        console.log(data.escape_routes);
-        foundEscapeRoutes = Object.values(data.escape_routes);
-        renderGrid(bufferedGridData.grids[currentFloor]);
-    
-        // Display path lengths
-        let totalLength = 0;
-        let stairwayDistance = 0;
-        let spacesOverMaxDistance = [];
-        foundEscapeRoutes.forEach(route => {
-            totalLength = Math.max(totalLength, route.distance);
-            stairwayDistance = Math.max(stairwayDistance, route.distance_to_stair || 0);
-            if (route.distance_to_stair > maxStairDistance) {
-                spacesOverMaxDistance.push(route.id);
+    for (let i = 0; i < spacesData.length; i++) {
+        const space = spacesData[i];
+        updateProgress((i / spacesData.length) * 100, `Calculating route for space ${i + 1} of ${spacesData.length}`);
+
+        try {
+            const response = await fetch('/api/calculate-escape-route', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    grids: bufferedGridData.grids,
+                    grid_size: bufferedGridData.grid_size,
+                    floors: bufferedGridData.floors,
+                    bbox: bufferedGridData.bbox,
+                    space: space,
+                    exits: goals.map(goal => [goal.row, goal.col, goal.floor]),
+                    allow_diagonal: allowDiagonal
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
             }
-        });
-    
-        const pathLengthsElement = document.getElementById('path-lengths');
-        pathLengthsElement.innerHTML = `
-            <h3>Escape Route Lengths:</h3>
-            <p>Longest escape route: ${totalLength.toFixed(2)} meters</p>
-            <p>Longest distance to stairway: ${stairwayDistance.toFixed(2)} meters</p>
-            <p>Spaces over max stair distance: ${spacesOverMaxDistance.join(', ') || 'None'}</p>
-        `;
-    
-    } catch (error) {
-        console.error('Error:', error);
-        showError(`An error occurred while calculating escape routes: ${error.message}`);
+
+            const data = await response.json();
+            foundEscapeRoutes.push(data.escape_route);
+
+            // Update statistics
+            if (data.escape_route.distance) {
+                totalLength = Math.max(totalLength, data.escape_route.distance);
+                stairwayDistance = Math.max(stairwayDistance, data.escape_route.distance_to_stair || 0);
+                if (data.escape_route.distance_to_stair > maxStairDistance) {
+                    spacesOverMaxDistance.push(data.escape_route.space_name);
+                }
+            } else {
+                spacesWithoutExits.push(data.escape_route.space_name);
+            }
+
+            // Render the current progress
+            renderGrid(bufferedGridData.grids[currentFloor]);
+
+        } catch (error) {
+            console.error('Error:', error);
+            showError(`An error occurred while calculating escape route for space ${space.name}: ${error.message}`);
+        }
     }
+
+    hideProgress();
+
+    // Display final results
+    const pathLengthsElement = document.getElementById('path-lengths');
+    pathLengthsElement.innerHTML = `
+        <h3>Escape Route Lengths:</h3>
+        <p>Longest escape route: ${totalLength.toFixed(2)} meters</p>
+        <p>Longest distance to stairway: ${stairwayDistance.toFixed(2)} meters</p>
+        <p>Spaces over max stair distance: ${spacesOverMaxDistance.join(', ') || 'None'}</p>
+        <p>Spaces with NO escape route: ${spacesWithoutExits.join(', ') || 'None'}</p>
+    `;
+
+    renderGrid(bufferedGridData.grids[currentFloor]);
 }
 
 function handleMaxStairDistanceChange(e) {

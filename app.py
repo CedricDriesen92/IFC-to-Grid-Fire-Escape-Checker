@@ -4,7 +4,7 @@ import os
 from typing import List, Dict, Tuple, Any
 from ifc_processing import process_ifc_file
 from grid_management import GridManager, validate_grid_data
-from pathfinding import find_path, detect_exits, calculate_escape_routes
+from pathfinding import find_path, detect_exits, calculate_escape_route
 import json
 
 import logging
@@ -171,23 +171,22 @@ def detect_spaces_route() -> tuple[Dict[str, Any], int]:
         app.logger.error(f"Error detecting spaces: {str(e)}", exc_info=True)
         return jsonify({'error': f'An error occurred while detecting spaces: {str(e)}'}), 500
     
-@app.route('/api/calculate-escape-routes', methods=['POST'])
-def calculate_escape_routes_route() -> tuple[Dict[str, Any], int]:
+@app.route('/api/calculate-escape-route', methods=['POST'])
+def api_calculate_escape_route():
     data = request.json
     try:
-        escape_routes = calculate_escape_routes(
-            data['grids'], 
-            data['grid_size'], 
-            data['floors'], 
-            data['bbox'], 
-            data['spaces'],
+        escape_route = calculate_escape_route(
+            data['grids'],
+            data['grid_size'],
+            data['floors'],
+            data['bbox'],
+            data['space'],
             data['exits'],
-            data.get('allow_diagonal', False)
+            data['allow_diagonal']
         )
-        return jsonify({'escape_routes': escape_routes}), 200
+        return jsonify({'escape_route': escape_route})
     except Exception as e:
-        app.logger.error(f"Error calculating escape routes: {str(e)}")
-        return jsonify({'error': f'An error occurred while calculating escape routes: {str(e)}'}), 500
+        return jsonify({'error': str(e)}), 400
 
 @app.route('/static/<path:path>')
 def send_static(path: str) -> Any:

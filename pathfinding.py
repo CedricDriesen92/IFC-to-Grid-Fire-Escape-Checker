@@ -192,86 +192,69 @@ class Pathfinder:
         path_lengths = self._calculate_path_lengths(path)
         return path, path_lengths
     
-    def calculate_escape_routes(self, spaces: List[Dict[str, Any]], exits: List[Tuple[int, int, int]]) -> Dict[str, Any]:
-        escape_routes = {}
-        for space in spaces:
-            print(space['name'])
-            candidate_points = self._select_candidate_points(space)
-            print(candidate_points)
-            
-            max_distance = 0
-            furthest_point = None
-            optimal_exit = None
-            optimal_path = None
-            distance_to_stair = float('inf')
-
-            for point in candidate_points:
-                min_exit_distance = float('inf')
-                best_exit = None
-                best_path = None
-                current_distance_to_stair = float('inf')
-
-                for exit in exits:
-                    exit = (exit[0], exit[1], exit[2])
-                    try:
-                        if point not in self.graph:
-                            print("point not in graph")
-                        if exit not in self.graph:
-                            print("exit not in graph") 
-                        path = nx.astar_path(self.graph, point, exit, heuristic=self._heuristic, weight='weight')
-                        distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(len(path)-1))
-                        
-                        # Calculate distance to first stair
-                        stair_distance = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), len(path))
-                        current_distance_to_stair = min(current_distance_to_stair, stair_distance)
-                        
-                        if distance < min_exit_distance:
-                            min_exit_distance = distance
-                            best_exit = exit
-                            best_path = path
-                    except nx.NetworkXNoPath:
-                        continue
-
-                if min_exit_distance > max_distance:
-                    max_distance = min_exit_distance
-                    furthest_point = point
-                    optimal_exit = best_exit
-                    optimal_path = best_path
-                    distance_to_stair = current_distance_to_stair
-
-            if furthest_point and optimal_exit:
-                escape_routes[space['id']] = {
-                    'furthest_point': furthest_point,
-                    'optimal_exit': optimal_exit,
-                    'optimal_path': optimal_path,
-                    'distance': max_distance * self.grid_size,  # Convert to real-world distance
-                    'distance_to_stair': distance_to_stair * self.grid_size,  # Convert to real-world distance
-                    'space_name': space['name']
-                }
-            else:
-                escape_routes[space['id']] = {
-                    'furthest_point': None,
-                    'optimal_exit': None,
-                    'optimal_path': None,
-                    'distance': None,
-                    'distance_to_stair': None,
-                    'space_name': space['name']
-                }
-
-        return escape_routes
-    
-    def _create_space_graph(self, space: Dict[str, Any]) -> nx.Graph:
-        G = nx.Graph()
-        points = set(map(tuple, space['points']))
+    def calculate_escape_route(self, space: Dict[str, Any], exits: List[Tuple[int, int, int]]) -> Dict[str, Any]:
+        print(space['name'])
+        candidate_points = self._select_candidate_points(space)
+        print(candidate_points)
         
-        for x, y in points:
-            for dx, dy in [(0,1), (1,0), (0,-1), (-1,0)] + ([(1,1), (1,-1), (-1,1), (-1,-1)] if self.allow_diagonal else []):
-                nx1, ny1 = x + dx, y + dy
-                if (nx1, ny1) in points:
-                    weight = 1.414 if dx != 0 and dy != 0 else 1
-                    G.add_edge((x, y, space['floor']), (nx1, ny1, space['floor']), weight=weight)
-        
-        return G
+        max_distance = 0
+        furthest_point = None
+        optimal_exit = None
+        optimal_path = None
+        distance_to_stair = float('inf')
+
+        for point in candidate_points:
+            min_exit_distance = float('inf')
+            best_exit = None
+            best_path = None
+            current_distance_to_stair = float('inf')
+
+            for exit in exits:
+                exit = (exit[0], exit[1], exit[2])
+                try:
+                    if point not in self.graph:
+                        print("point not in graph")
+                    if exit not in self.graph:
+                        print("exit not in graph") 
+                    path = nx.astar_path(self.graph, point, exit, heuristic=self._heuristic, weight='weight')
+                    distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(len(path)-1))
+                    
+                    # Calculate distance to first stair
+                    stair_distance = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), len(path))
+                    current_distance_to_stair = min(current_distance_to_stair, stair_distance)
+                    
+                    if distance < min_exit_distance:
+                        min_exit_distance = distance
+                        best_exit = exit
+                        best_path = path
+                except nx.NetworkXNoPath:
+                    continue
+
+            if min_exit_distance > max_distance:
+                max_distance = min_exit_distance
+                furthest_point = point
+                optimal_exit = best_exit
+                optimal_path = best_path
+                distance_to_stair = current_distance_to_stair
+
+        if furthest_point and optimal_exit:
+            return {
+                'furthest_point': furthest_point,
+                'optimal_exit': optimal_exit,
+                'optimal_path': optimal_path,
+                'distance': max_distance * self.grid_size,  # Convert to real-world distance
+                'distance_to_stair': distance_to_stair * self.grid_size,  # Convert to real-world distance
+                'space_name': space['name']
+            }
+        else:
+            return {
+                'furthest_point': None,
+                'optimal_exit': None,
+                'optimal_path': None,
+                'distance': None,
+                'distance_to_stair': None,
+                'space_name': space['name']
+            }
     
     def _select_candidate_points(self, space: Dict[str, Any]) -> List[Tuple[int, int, int]]:
         points = np.array(space['points'])
@@ -318,8 +301,8 @@ def detect_exits(grids: List[List[List[str]]], grid_size: float, floors: List[Di
         print(f"Error in detect_exits: {str(e)}")
         raise
 
-def calculate_escape_routes(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], 
-                            bbox: Dict[str, float], spaces: List[Dict[str, Any]], exits: List[Tuple[int, int, int]], 
-                            allow_diagonal: bool = False) -> Dict[str, Any]:
+def calculate_escape_route(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], 
+                           bbox: Dict[str, float], space: Dict[str, Any], exits: List[Tuple[int, int, int]], 
+                           allow_diagonal: bool = False) -> Dict[str, Any]:
     pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal)
-    return pathfinder.calculate_escape_routes(spaces, exits)
+    return pathfinder.calculate_escape_route(space, exits)
