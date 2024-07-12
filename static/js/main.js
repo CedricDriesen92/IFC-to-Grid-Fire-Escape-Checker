@@ -208,17 +208,21 @@ function renderGrid(grid) {
 
     if (foundEscapeRoutes) {
         let totalLength = 0;
-        let stairwayDistance = 0;
+        let stairwayDistance = -1;
         let spacesOverMaxDistance = [];
         let spacesWithoutExits = [];
         foundEscapeRoutes.forEach(route => {
             if (route.distance){
                 totalLength = Math.max(totalLength, route.distance);
                 stairwayDistance = Math.max(stairwayDistance, route.distance_to_stair);
-                const isOverMaxDistance = route.distance_to_stair > maxStairDistance;
-                if (isOverMaxDistance){
+                const isOverMaxDistance = route.distance_to_stair > maxStairDistance || route.distance > maxStairDistance;
+                if (isOverMaxDistance && route.distance_to_stair > maxStairDistance){
                     spacesOverMaxDistance.push(route.space_name);
                     outputText.innerHTML.concat("\nSpace: ", route.space_name, "\nDistance to stairway too long: ", route.distance_to_stair, "\nTotal route length: ", route.distance);
+                }
+                else if(isOverMaxDistance){
+                    spacesOverMaxDistance.push(route.space_name);
+                    outputText.innerHTML.concat("\nSpace: ", route.space_name, "\nDistance to closest escape is too long: ", route.distance);
                 }
                 ctx.strokeStyle = isOverMaxDistance ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 255, 0, 0.8)';
                 ctx.lineWidth = 4;
@@ -356,7 +360,9 @@ function renderSpaces(ctx) {
             const route = foundEscapeRoutes.find(r => r.space_name === space.name);
             if (route && route.distance) {
                 ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
-                ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
+                if(route.distance_to_stair >= 0){
+                    ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
+                }
             }
             else if(route){
                 ctx.fillStyle = 'rgba(0, 0, 0, 1)';
@@ -847,7 +853,7 @@ async function calculateEscapeRoutes() {
 
     foundEscapeRoutes = [];
     let totalLength = 0;
-    let stairwayDistance = 0;
+    let stairwayDistance = -1;
     let spacesOverMaxDistance = [];
     let spacesWithoutExits = [];
 
@@ -883,9 +889,9 @@ async function calculateEscapeRoutes() {
 
             // Update statistics
             if (data.escape_route.distance) {
-                totalLength = Math.max(totalLength, data.escape_route.distance);
-                stairwayDistance = Math.max(stairwayDistance, data.escape_route.distance_to_stair || 0);
-                if (data.escape_route.distance_to_stair > maxStairDistance) {
+                totalLength = data.escape_route.distance;
+                stairwayDistance = data.escape_route.distance_to_stair;
+                if (data.escape_route.distance_to_stair > maxStairDistance || data.escape_route.distance > maxStairDistance) {
                     spacesOverMaxDistance.push(data.escape_route.space_name);
                 }
             } else {

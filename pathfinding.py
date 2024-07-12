@@ -201,13 +201,13 @@ class Pathfinder:
         furthest_point = None
         optimal_exit = None
         optimal_path = None
-        distance_to_stair = float('inf')
+        distance_to_stair = -1  # Initialize to -1
 
         for point in candidate_points:
             min_exit_distance = float('inf')
             best_exit = None
             best_path = None
-            current_distance_to_stair = float('inf')
+            current_distance_to_stair = -1  # Initialize to -1 for each point
 
             for exit in exits:
                 exit = (exit[0], exit[1], exit[2])
@@ -220,8 +220,10 @@ class Pathfinder:
                     distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(len(path)-1))
                     
                     # Calculate distance to first stair
-                    stair_distance = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), len(path))
-                    current_distance_to_stair = min(current_distance_to_stair, stair_distance)
+                    stair_index = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), -1)
+                    if stair_index != -1:
+                        stair_distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(stair_index))
+                        current_distance_to_stair = stair_distance if current_distance_to_stair == -1 else min(current_distance_to_stair, stair_distance)
                     
                     if distance < min_exit_distance:
                         min_exit_distance = distance
@@ -243,7 +245,7 @@ class Pathfinder:
                 'optimal_exit': optimal_exit,
                 'optimal_path': optimal_path,
                 'distance': max_distance * self.grid_size,  # Convert to real-world distance
-                'distance_to_stair': distance_to_stair * self.grid_size,  # Convert to real-world distance
+                'distance_to_stair': distance_to_stair * self.grid_size if distance_to_stair <= -1 else -1,  # Convert to real-world distance or keep as -1
                 'space_name': space['name']
             }
         else:

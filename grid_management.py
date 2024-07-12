@@ -144,7 +144,7 @@ class GridManager:
             rows, cols = wall_mask.shape
             for i in range(rows):
                 for j in range(cols):
-                    if wall_mask[i, j] and original_grid[i, j] not in ['wall']:
+                    if wall_mask[i, j] and original_grid[i, j] not in ['wall', 'door']:
                         buffered_grid[i, j] = 'walla'
             
             self.buffered_grids[floor] = buffered_grid
