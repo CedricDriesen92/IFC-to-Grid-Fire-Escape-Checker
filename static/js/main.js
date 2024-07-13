@@ -28,9 +28,17 @@ let includeEmptyTiles = false;
 let foundEscapeRoutes = null;
 let spaceColors = {};
 let maxStairDistance = 30;
+let isDragging = false;
+let lastMouseX, lastMouseY;
+let zoomFactor = 1;
+let panX = 0;
+let panY = 0;
+let transform = new DOMMatrix();
+let inverseTransform = new DOMMatrix();
 
 // DOM elements
 const gridContainer = document.getElementById('grid-container');
+const canvas = gridContainer.querySelector('canvas');
 const progressContainer = document.getElementById('progress-container');
 const progressBar = document.getElementById('progress-bar');
 const progressText = document.getElementById('progress-text');
@@ -58,7 +66,6 @@ gridContainer.addEventListener('mouseup', handleMouseUp);
 gridContainer.addEventListener('mouseleave', handleMouseLeave);
 gridContainer.addEventListener('mousemove', handleGridHover);
 gridContainer.addEventListener('mouseout', handleGridMouseOut);
-gridContainer.addEventListener('dragstart', (e) => e.preventDefault());
 allowDiagonalCheckbox.addEventListener('change', (e) => {
 allowDiagonal = e.target.checked;
 });
@@ -73,13 +80,21 @@ document.getElementById('include-empty-tiles').addEventListener('change', (e) =>
 });
 spaceDetectionButton.addEventListener('click', updateSpaces);
 maxStairDistanceSlider.addEventListener('input', handleMaxStairDistanceChange);
+gridContainer.addEventListener('wheel', handleWheel);
 
-document.getElementById('draw-wall').addEventListener('click', () => setCurrentType('wall'));
-document.getElementById('draw-door').addEventListener('click', () => setCurrentType('door'));
-document.getElementById('draw-stair').addEventListener('click', () => setCurrentType('stair'));
-document.getElementById('draw-floor').addEventListener('click', () => setCurrentType('floor'));
-document.getElementById('draw-empty').addEventListener('click', () => setCurrentType('empty'));
+document.getElementById('paint-tool').addEventListener('click', () => setCurrentTool('paint'));
 document.getElementById('fill-tool').addEventListener('click', () => setCurrentTool('fill'));
+document.getElementById('draw-wall').addEventListener('click', () => setCurrentType('wall', 'paint'));
+document.getElementById('draw-door').addEventListener('click', () => setCurrentType('door', 'paint'));
+document.getElementById('draw-stair').addEventListener('click', () => setCurrentType('stair', 'paint'));
+document.getElementById('draw-floor').addEventListener('click', () => setCurrentType('floor', 'paint'));
+document.getElementById('draw-empty').addEventListener('click', () => setCurrentType('empty', 'paint'));
+document.getElementById('fill-wall').addEventListener('click', () => setCurrentType('wall', 'fill'));
+document.getElementById('fill-door').addEventListener('click', () => setCurrentType('door', 'fill'));
+document.getElementById('fill-stair').addEventListener('click', () => setCurrentType('stair', 'fill'));
+document.getElementById('fill-floor').addEventListener('click', () => setCurrentType('floor', 'fill'));
+document.getElementById('fill-empty').addEventListener('click', () => setCurrentType('empty', 'fill'));
+
 document.getElementById('prev-floor').addEventListener('click', navigateToPreviousFloor);
 document.getElementById('next-floor').addEventListener('click', navigateToNextFloor);
 document.getElementById('clear-floor').addEventListener('click', clearCurrentFloor);
@@ -88,10 +103,49 @@ document.getElementById('remove-floor').addEventListener('click', removeCurrentF
 document.getElementById('set-start').addEventListener('click', () => setCurrentType('start'));
 document.getElementById('set-goal').addEventListener('click', () => setCurrentType('goal'));
 document.getElementById('find-path').addEventListener('click', findPath);
-document.getElementById('download-grid').addEventListener('click', downloadGrid);
+//document.getElementById('download-grid').addEventListener('click', downloadGrid);
 document.getElementById('calculate-escape-routes').addEventListener('click', calculateEscapeRoutes);
 
+function initializeToolMenus() {
+    const paintTool = document.getElementById('paint-tool');
+    const fillTool = document.getElementById('fill-tool');
+    const paintMenu = document.getElementById('paint-menu');
+    const fillMenu = document.getElementById('fill-menu');
 
+    if (!paintTool || !fillTool || !paintMenu || !fillMenu) {
+        console.error('One or more tool elements not found');
+        return;
+    }
+
+    function showMenu(menu) {
+        menu.classList.remove('hidden');
+    }
+
+    function hideMenu(menu) {
+        menu.classList.add('hidden');
+    }
+
+    paintTool.addEventListener('mouseenter', () => showMenu(paintMenu));
+    paintTool.addEventListener('mouseleave', () => {
+        setTimeout(() => {
+            if (!paintMenu.matches(':hover')) {
+                hideMenu(paintMenu);
+            }
+        }, 100);
+    });
+    paintMenu.addEventListener('mouseleave', () => hideMenu(paintMenu));
+
+    fillTool.addEventListener('mouseenter', () => showMenu(fillMenu));
+    fillTool.addEventListener('mouseleave', () => {
+        setTimeout(() => {
+            if (!fillMenu.matches(':hover')) {
+                hideMenu(fillMenu);
+            }
+        }, 100);
+    });
+    fillMenu.addEventListener('mouseleave', () => hideMenu(fillMenu));
+    console.log("Tools init");
+}
 
 async function uploadFile(event) {
     event.preventDefault();
@@ -144,7 +198,7 @@ function handleProcessedData(data) {
 
     console.log('Grid data seems valid, initializing grid...');
     initializeGrid();
-    showGridEditor();
+    initializeToolMenus();
 }
 
 function initializeGrid() {
@@ -173,16 +227,15 @@ function initializeGrid() {
 }
 
 function renderGrid(grid) {
-    //console.log('Rendering grid for floor:', currentFloor);
-    //console.log('Grid data:', grid);
-    
     gridContainer.innerHTML = '';
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
 
     canvas.width = grid[0].length * cellSize;
     canvas.height = grid.length * cellSize;
-    //console.log('Canvas dimensions:', canvas.width, canvas.height);
+
+    // Apply the current transform to the canvas context
+    ctx.setTransform(transform);
 
     // Render the base grid
     grid.forEach((row, i) => {
@@ -257,9 +310,7 @@ function renderGrid(grid) {
         });
         const pathLengthsElement = document.getElementById('path-lengths');
         pathLengthsElement.innerHTML = `
-            <h3>Escape Route Lengths:</h3>
-            <p>Longest escape route: ${totalLength.toFixed(2)} meters</p>
-            <p>Longest distance to stairway: ${stairwayDistance.toFixed(2)} meters</p>
+            <h3>Escape routes calculated:</h3>
             <p>Spaces over max stair distance: ${spacesOverMaxDistance.join(', ') || 'None'}</p>
             <p>Spaces with NO escape route: ${spacesWithoutExits.join(', ') || 'None'}</p>
         `;
@@ -286,9 +337,8 @@ function renderGrid(grid) {
         });
     }
 
-
     gridContainer.appendChild(canvas);
-    //console.log('Grid rendered and appended to container');
+    updateTransform();
 }
 
 function renderSpaces(ctx) {
@@ -418,41 +468,75 @@ function getCellColor(cellType) {
 }
 
 function handleMouseDown(e) {
-    if (e.button === 2) { // Right click
+    if (e.button === 2) { // Right mouse button
+        isDragging = true;
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
         e.preventDefault();
-        const { row, col } = getCellCoordinates(e);
-        removeStartOrGoal(row, col);
-    } else {
-        isMouseDown = true;
+    } else if (e.button === 0) { // Left mouse button
         const { row, col } = getCellCoordinates(e);
         startPainting(row, col);
     }
 }
 
-function removeStartOrGoal(row, col) {
-    if (start && start.row === row && start.col === col && start.floor === currentFloor) {
-        start = null;
+function handleMouseMove(e) {
+    if (isDragging) {
+        const dx = e.clientX - lastMouseX;
+        const dy = e.clientY - lastMouseY;
+        transform = transform.translate(dx, dy);
+        updateTransform();
+        lastMouseX = e.clientX;
+        lastMouseY = e.clientY;
+        renderGrid(bufferedGridData.grids[currentFloor]);
     } else {
-        goals = goals.filter(goal => !(goal.row === row && goal.col === col && goal.floor === currentFloor));
+        const { row, col } = getCellCoordinates(e);
+        if (isMouseDown) {
+            paint(row, col);
+        } else {
+            showPreview(row, col);
+        }
     }
+}
+
+function handleMouseUp(e) {
+    if (e.button === 2) {
+        isDragging = false;
+    } else if (e.button === 0) {
+        stopPainting();
+    }
+}
+
+function handleMouseLeave(e) {
+    if (e.button === 2) {
+        isDragging = false;
+    } else if (e.button === 0) {
+        stopPainting();
+    }
+}
+
+function handleWheel(e) {
+    e.preventDefault();
+    const delta = e.deltaY;
+    const scaleFactor = delta > 0 ? 0.9 : 1.1;
+
+    const rect = gridContainer.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+
+    // Translate to the mouse position, scale, then translate back
+    transform = transform
+        .translate(mouseX, mouseY)
+        .scale(scaleFactor)
+        .translate(-mouseX, -mouseY);
+
+    updateTransform();
+    cellSize *= scaleFactor;
     renderGrid(bufferedGridData.grids[currentFloor]);
 }
 
-function handleMouseMove(e) {
-    const { row, col } = getCellCoordinates(e);
-    if (isMouseDown) {
-        paint(row, col);
-    } else {
-        showPreview(row, col);
-    }
-}
-
-function handleMouseUp() {
-    stopPainting();
-}
-
-function handleMouseLeave() {
-    stopPainting();
+function updateCanvasTransform() {
+    const canvas = gridContainer.querySelector('canvas');
+    canvas.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomFactor})`;
 }
 
 function handleGridHover(e) {
@@ -468,6 +552,20 @@ function handleGridHover(e) {
 
 function handleGridMouseOut() {
     renderGrid(bufferedGridData.grids[currentFloor]);
+}
+
+function getCellCoordinates(e) {
+    const rect = gridContainer.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Use the inverse transform to convert screen coordinates to world coordinates
+    const point = inverseTransform.transformPoint(new DOMPoint(x, y));
+
+    const col = Math.floor(point.x / cellSize);
+    const row = Math.floor(point.y / cellSize);
+
+    return { row, col };
 }
 
 function isPointInPolygon(x, y, polygon) {
@@ -512,7 +610,8 @@ function highlightPath(path) {
 
 function startPainting(row, col) {
     isPainting = true;
-    lastPaintedCell = null;
+    isMouseDown = true;
+    lastPaintedCell = { row, col };
     clearPreview();
     paint(row, col);
 }
@@ -583,23 +682,25 @@ function interpolatePaint(startRow, startCol, endRow, endCol) {
     const sy = startRow < endRow ? 1 : -1;
     let err = dx - dy;
 
-    while (true) {
-        updates.push(...paintWithBrush(startRow, startCol));
+    let currentRow = startRow;
+    let currentCol = startCol;
 
-        if (startRow === endRow && startCol === endCol) break;
+    while (true) {
+        updates.push(...paintWithBrush(currentRow, currentCol));
+
+        if (currentRow === endRow && currentCol === endCol) break;
         const e2 = 2 * err;
         if (e2 > -dy) {
             err -= dy;
-            startCol += sx;
+            currentCol += sx;
         }
         if (e2 < dx) {
             err += dx;
-            startRow += sy;
+            currentRow += sy;
         }
     }
     return updates;
 }
-
 function floodFill(floor, row, col, targetElement) {
     const updates = [];
     const stack = [[row, col]];
@@ -616,6 +717,7 @@ function floodFill(floor, row, col, targetElement) {
         }
 
         originalGridData.grids[floor][r][c] = currentType;
+        bufferedGridData.grids[floor][r][c] = currentType;
         updates.push({ floor, row: r, col: c, type: currentType });
 
         stack.push([r+1, c], [r-1, c], [r, c+1], [r, c-1]);
@@ -686,12 +788,30 @@ function clearPreview() {
     renderGrid(bufferedGridData.grids[currentFloor]);
 }
 
+function updateTransform() {
+    const canvas = gridContainer.querySelector('canvas');
+    if (canvas) {
+        canvas.style.transform = transform.toString();
+        inverseTransform = transform.inverse();
+    }
+}
+
 function getCellCoordinates(e) {
-    const rect = e.target.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const col = Math.floor(x / cellSize);
-    const row = Math.floor(y / cellSize);
+    const canvas = gridContainer.querySelector('canvas');
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+
+    // Get the mouse position relative to the canvas
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    const mouseY = (e.clientY - rect.top) * scaleY;
+
+    // Apply the inverse transform to get the world coordinates
+    const point = inverseTransform.transformPoint(new DOMPoint(mouseX, mouseY));
+
+    const col = Math.floor(point.x / cellSize);
+    const row = Math.floor(point.y / cellSize);
+
     return { row, col };
 }
 
@@ -700,9 +820,14 @@ function isValidCell(row, col) {
            col >= 0 && col < bufferedGridData.grids[currentFloor][0].length;
 }
 
-function setCurrentType(type) {
-    currentType = type;
-    currentTool = 'paint';
+function setCurrentType(type, tool) {
+    if (tool === 'paint') {
+        currentType = type;
+        currentTool = 'paint';
+    } else if (tool === 'fill') {
+        currentType = type;
+        currentTool = 'fill';
+    }
 }
 
 function setCurrentTool(tool) {
@@ -1261,6 +1386,7 @@ function init() {
     wallBufferSlider.value = wallBuffer;
 
     // Update displays
+    updateTransform();
     document.getElementById('brush-size-display').textContent = brushSize;
     const initialBufferSize = wallBuffer * bufferedGridData.grid_size;
     document.getElementById('wall-buffer-display').textContent = initialBufferSize.toFixed(2);
@@ -1268,4 +1394,14 @@ function init() {
 }
 
 // Call the init function when the DOM is fully loaded
-document.addEventListener('DOMContentLoaded', init);
+//document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => {
+    init();
+    const observer = new MutationObserver((mutations) => {
+        if (gridContainer.querySelector('canvas')) {
+            //initializeDragFunctionality();
+            observer.disconnect();
+            //console.log("Dragging initiated");
+        }
+    });
+});

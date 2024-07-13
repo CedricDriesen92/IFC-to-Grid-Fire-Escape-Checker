@@ -1,110 +1,161 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IFC-to-Grid Pathfinder</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: {
+                            100: '#1E1E1E',
+                            200: '#2D2D2D',
+                            300: '#3C3C3C',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
     <style>
         #grid-container {
-            overflow: auto;
-            max-width: none;
-            max-height: 70%;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 0;
+            overflow: hidden;
         }
         canvas {
             cursor: crosshair;
         }
     </style>
 </head>
-<body class="bg-gray-100">
-    <div class="container mx-auto p-4">
-        <h1 class="text-3xl font-bold mb-4">BIM Pathfinder</h1>
+<body class="bg-dark-100 text-gray-200">
+    <div id="grid-container"></div>
 
-        <div class="mb-4">
-            <h2 class="text-xl font-bold mb-2">Upload IFC or JSON File</h2>
-            <form id="file-upload-form" enctype="multipart/form-data">
-                <input type="file" name="file" accept=".ifc,.json" class="mb-2">
-                <input type="number" name="grid_size" value="0.1" step="0.01" min="0.01" max="1" class="mb-2">
-                <button type="submit" class="bg-blue-500 text-white px-4 py-2 rounded">Upload and Process</button>
-            </form>
+    <div class="fixed top-0 left-0 p-4 z-10">
+        <div class="bg-dark-200 rounded-lg shadow-lg p-4 space-y-4">
+            <h1 class="text-2xl font-bold mb-4">BIM Pathfinder</h1>
+
+            <div class="space-y-2">
+                <h2 class="text-lg font-semibold">File</h2>
+                <form id="file-upload-form" enctype="multipart/form-data" class="flex flex-col space-y-2">
+                    <input type="file" name="file" accept=".ifc,.json" class="text-sm">
+                    <div class="flex items-center space-x-2">
+                        <label for="grid-size" class="text-sm">Grid Size:</label>
+                        <input type="number" id="grid-size" name="grid_size" value="0.1" step="0.01" min="0.01" max="1" class="bg-dark-300 rounded px-2 py-1 text-sm w-20">
+                    </div>
+                    <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded text-sm">Process</button>
+                </form>
+            </div>
+
+            <div class="space-y-2">
+                <h2 class="text-lg font-semibold">Tools</h2>
+                <div class="grid grid-cols-2 gap-2">
+                    <div class="relative">
+                        <button id="paint-tool" class="w-full bg-blue-600 text-white px-2 py-1 rounded text-sm">Paint</button>
+                        <div id="paint-menu" class="absolute left-0 mt-1 w-full bg-dark-300 rounded shadow-lg hidden">
+                            <button id="draw-wall" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Wall</button>
+                            <button id="draw-door" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Door</button>
+                            <button id="draw-stair" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Stair</button>
+                            <button id="draw-floor" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Floor</button>
+                            <button id="draw-empty" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Empty</button>
+                        </div>
+                    </div>
+                    <div class="relative">
+                        <button id="fill-tool" class="w-full bg-purple-600 text-white px-2 py-1 rounded text-sm">Fill</button>
+                        <div id="fill-menu" class="absolute left-0 mt-1 w-full bg-dark-300 rounded shadow-lg hidden">
+                            <button id="fill-wall" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Wall</button>
+                            <button id="fill-door" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Door</button>
+                            <button id="fill-stair" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Stair</button>
+                            <button id="fill-floor" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Floor</button>
+                            <button id="fill-empty" class="w-full text-left px-2 py-1 hover:bg-dark-200 text-sm">Empty</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="space-y-2">
+                <h2 class="text-lg font-semibold">Floor Control</h2>
+                <div class="flex space-x-2">
+                    <button id="prev-floor" class="bg-green-600 text-white px-2 py-1 rounded text-sm">&lt;</button>
+                    <span id="current-floor" class="bg-dark-300 px-2 py-1 rounded text-sm">Floor: 1 / 1</span>
+                    <button id="next-floor" class="bg-green-600 text-white px-2 py-1 rounded text-sm">&gt;</button>
+                </div>
+                <div class="flex space-x-2">
+                    <button id="add-floor" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">Add</button>
+                    <button id="remove-floor" class="bg-red-600 text-white px-2 py-1 rounded text-sm">Remove</button>
+                    <button id="clear-floor" class="bg-yellow-600 text-white px-2 py-1 rounded text-sm">Clear</button>
+                </div>
+            </div>
+
+            <div class="space-y-2">
+                <h2 class="text-lg font-semibold">Settings</h2>
+                <div class="flex items-center space-x-2">
+                    <label for="wall-buffer" class="text-sm">Wall Buffer:</label>
+                    <input type="range" id="wall-buffer" min="0" max="10" value="0" step="1" class="w-24">
+                    <span id="wall-buffer-display" class="text-sm">0</span>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <label for="zoom-slider" class="text-sm">Zoom:</label>
+                    <input type="range" id="zoom-slider" min="100" max="25000" value="100" class="w-24">
+                    <span id="zoom-level" class="text-sm">100%</span>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <label for="brush-size" class="text-sm">Brush Size:</label>
+                    <input type="range" id="brush-size" min="1" max="10" value="1" step="1" class="w-24">
+                    <span id="brush-size-display" class="text-sm">1</span>
+                </div>
+            </div>
+
+            <div class="space-y-2">
+                <h2 class="text-lg font-semibold">Pathfinder</h2>
+                <div class="grid grid-cols-2 gap-2">
+                    <button id="set-start" class="bg-green-600 text-white px-2 py-1 rounded text-sm">Set Start</button>
+                    <button id="set-goal" class="bg-red-600 text-white px-2 py-1 rounded text-sm">Set Goal</button>
+                    <button id="detect-exits" class="bg-yellow-600 text-white px-2 py-1 rounded text-sm">Detect Exits</button>
+                    <button id="find-path" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">Find Path</button>
+                    <button id="calculate-escape-routes" class="bg-pink-600 text-white px-2 py-1 rounded text-sm">Calculate Routes</button>
+                    <button id="export-path" class="bg-green-600 text-white px-2 py-1 rounded text-sm">Export Path</button>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <input type="checkbox" id="include-empty-tiles" class="form-checkbox">
+                    <label for="include-empty-tiles" class="text-sm">Include empty tiles in spaces</label>
+                </div>
+                <button id="update-spaces" class="bg-blue-600 text-white px-2 py-1 rounded text-sm">Update Spaces</button>
+                <div class="flex items-center space-x-2">
+                    <input type="checkbox" id="allow-diagonal" name="allow-diagonal" checked class="form-checkbox">
+                    <label for="allow-diagonal" class="text-sm">Allow Diagonal Movement</label>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <input type="checkbox" id="minimize-cost" name="minimize-cost" checked class="form-checkbox">
+                    <label for="minimize-cost" class="text-sm">Minimize Cost</label>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <label for="max-stair-distance" class="text-sm">Max Stair Distance:</label>
+                    <input type="range" id="max-stair-distance" min="0" max="100" value="30" step="1" class="w-24">
+                    <span id="max-stair-distance-display" class="text-sm">30 m</span>
+                </div>
+            </div>
         </div>
-
-        <div id="progress-container" class="hidden mb-4">
-            <div class="mb-2">Processing file:</div>
-            <div class="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700 mb-1">
-                <div id="progress-bar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
-            </div>
-            <div id="progress-text" class="text-sm">0%</div>
-        </div>
-
-        <div id="grid-editor" class="mb-4 hidden">
-            <h2 class="text-xl font-bold mb-2">Grid Editor</h2>
-            <div class="mb-2">
-                <button id="draw-wall" class="bg-black text-white px-4 py-2 rounded mr-2">Wall</button>
-                <button id="draw-door" class="bg-orange-500 text-white px-4 py-2 rounded mr-2">Door</button>
-                <button id="draw-stair" class="bg-red-500 text-white px-4 py-2 rounded mr-2">Stair</button>
-                <button id="draw-floor" class="bg-pink-200 text-gray-800 px-4 py-2 rounded mr-2">Floor</button>
-                <button id="draw-empty" class="bg-white text-gray-800 px-4 py-2 rounded border border-gray-300 mr-2">Empty</button>
-                <button id="fill-tool" class="bg-purple-500 text-white px-4 py-2 rounded mr-2">Fill</button>
-                <button id="clear-floor" class="bg-red-700 text-white px-4 py-2 rounded mr-2">Clear Floor</button>
-            </div>
-            <div class="mb-2">
-                <button id="prev-floor" class="bg-green-500 text-white px-4 py-2 rounded mr-2">Previous Floor</button>
-                <button id="next-floor" class="bg-green-500 text-white px-4 py-2 rounded mr-2">Next Floor</button>
-                <button id="add-floor" class="bg-blue-500 text-white px-4 py-2 rounded mr-2">Add Floor</button>
-                <button id="remove-floor" class="bg-red-500 text-white px-4 py-2 rounded mr-2">Remove Floor</button>
-                <span id="current-floor" class="mr-2">Floor: 1 / 1</span>
-            </div>
-            <div class="mb-2">
-                <label for="wall-buffer" class="mr-2">Wall Buffer:</label>
-                <input type="range" id="wall-buffer" min="0" max="10" value="0" step="1" class="mr-2">
-                <span id="wall-buffer-display">0</span>
-            </div>
-            <div class="mb-2">
-                <label for="zoom-slider" class="mr-2">Zoom:</label>
-                <input type="range" id="zoom-slider" min="100" max="25000" value="100" class="mr-2">
-                <span id="zoom-level">100%</span>
-            </div>
-            <div class="mb-2">
-                <label for="brush-size" class="mr-2">Brush Size:</label>
-                <input type="range" id="brush-size" min="1" max="10" value="1" step="1" class="mr-2">
-                <span id="brush-size-display">1</span>
-            </div>
-            <div id="grid-container" class="p-2"></div>
-            <button id="download-grid" class="bg-green-500 text-white px-4 py-2 rounded mt-2">Download Grid</button>
-        </div>
-
-        <div id="pathfinder" class="mb-4 hidden">
-            <h2 class="text-xl font-bold mb-2">Pathfinder</h2>
-            <button id="set-start" class="bg-green-500 text-white px-4 py-2 rounded mr-2">Set Start</button>
-            <button id="set-goal" class="bg-red-500 text-white px-4 py-2 rounded mr-2">Set Goal</button>
-            <button id="detect-exits"class="bg-red-400 text-white px-4 py-2 rounded mr-2">Detect Exits</button>
-            <button id="find-path" class="bg-blue-500 text-white px-4 py-2 rounded">Find Path</button>
-            <button id="calculate-escape-routes" class="bg-pink-500 text-white px-4 py-2 rounded">Calculate Routes</button>
-            <div>
-                <input type="checkbox" id="include-empty-tiles">
-                <label for="include-empty-tiles">Include empty tiles in spaces</label>
-                <button id="update-spaces" class="bg-blue-500 text-white px-4 py-2 rounded">Update Spaces</button>
-            </div>
-            <div>
-                <input type="checkbox" id="allow-diagonal" name="allow-diagonal" checked>
-                <label for="allow-diagonal">Allow Diagonal Movement</label>
-            </div>
-            <div>
-                <input type="checkbox" id="minimize-cost" name="minimize-cost" checked>
-                <label for="minimize-cost">Minimize Cost? (uncheck: distance)</label>
-            </div>
-            <div>
-                <label for="max-stair-distance">Max Stair Distance:</label>
-                <input type="range" id="max-stair-distance" min="0" max="100" value="30" step="1">
-                <span id="max-stair-distance-display">30 m</span>
-            </div>
-            <button id="export-path" class="bg-green-500 text-white px-4 py-2 rounded mr-2">Export Path</button>
-        </div>
-
-        <div id="result"></div>
-        <div id="path-lengths"></div>
     </div>
+
+    <div id="progress-container" class="hidden fixed top-4 right-4 bg-dark-200 p-4 rounded-lg shadow-lg z-20">
+        <div class="mb-2">Processing file:</div>
+        <div class="w-full bg-gray-700 rounded-full h-2.5 mb-1">
+            <div id="progress-bar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+        </div>
+        <div id="progress-text" class="text-sm">0%</div>
+    </div>
+
+    <div id="result" class="fixed bottom-4 left-4 bg-dark-200 p-4 rounded-lg shadow-lg z-20 max-w-md"></div>
+    <div id="path-lengths" class="fixed bottom-4 right-4 bg-dark-200 p-4 rounded-lg shadow-lg z-20 max-w-md"></div>
 
     <script src="/static/js/main.js"></script>
 </body>

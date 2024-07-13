@@ -8,7 +8,7 @@ from pathfinding import find_path, detect_exits, calculate_escape_route
 import json
 
 import logging
-import traceback
+import sys, traceback
 
 
 logging.basicConfig(level=logging.DEBUG)
@@ -50,6 +50,7 @@ def process_file() -> tuple[Dict[str, Any], int]:
                 return jsonify(result), 200
             except Exception as e:
                 app.logger.error(f"Error processing file: {str(e)}")
+                traceback.print_exc(file=sys.stdout)
                 return jsonify({'error': 'An error occurred while processing the file'}), 500
     
     return jsonify({'error': 'Invalid file type'}), 400
