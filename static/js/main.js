@@ -472,11 +472,11 @@ async function updateSpaces() {
 
 function getCellColor(cellType) {
     const colors = {
-        'wall': '#000000',
-        'door': '#f97316',
-        'stair': '#ef4444',
-        'floor': '#fbcfe8',
-        'walla': '#9ca3af',
+        'wall': '#0e0e0e',
+        'door': '#755e5a',
+        'stair': '#e1c169',
+        'floor': '#e5d1e5',
+        'walla': '#92a0a0',
         'empty': '#ffffff'
     };
     return colors[cellType] || '#ffffff';
@@ -860,13 +860,8 @@ function isValidCell(row, col) {
 }
 
 function setCurrentType(type, tool) {
-    if (tool === 'paint') {
-        currentType = type;
-        currentTool = 'paint';
-    } else if (tool === 'fill') {
-        currentType = type;
-        currentTool = 'fill';
-    }
+    currentType = type;
+    currentTool = tool;
 }
 
 function setCurrentTool(tool) {
@@ -1096,7 +1091,7 @@ function handleMaxStairDistanceChange(e) {
 
 function generateRandomColor() {
     const hue = Math.floor(Math.random() * 360);
-    return `hsl(${hue}, 70%, 80%)`;
+    return `hsla(${hue}, 70%, 80%, 30%)`;
 }
 
 function updateBufferForPaintedCells() {
