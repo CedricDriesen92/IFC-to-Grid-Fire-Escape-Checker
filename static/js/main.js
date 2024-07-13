@@ -234,9 +234,6 @@ function renderGrid(grid) {
     canvas.width = grid[0].length * cellSize;
     canvas.height = grid.length * cellSize;
 
-    // Apply the current transform to the canvas context
-    ctx.setTransform(transform);
-
     // Render the base grid
     grid.forEach((row, i) => {
         row.forEach((cell, j) => {
@@ -245,7 +242,7 @@ function renderGrid(grid) {
         });
     });
 
-    // Render IFC spaces
+    // Render spaces
     renderSpaces(ctx);
 
     // Render path if it exists
@@ -338,7 +335,25 @@ function renderGrid(grid) {
     }
 
     gridContainer.appendChild(canvas);
-    updateTransform();
+    updateCanvasPosition();
+}
+
+function transformRect(rect, matrix) {
+    const topLeft = matrix.transformPoint(new DOMPoint(rect.left, rect.top));
+    const bottomRight = matrix.transformPoint(new DOMPoint(rect.right, rect.bottom));
+    return new DOMRect(
+        Math.min(topLeft.x, bottomRight.x),
+        Math.min(topLeft.y, bottomRight.y),
+        Math.abs(bottomRight.x - topLeft.x),
+        Math.abs(bottomRight.y - topLeft.y)
+    );
+}
+
+function updateCanvasPosition() {
+    const canvas = gridContainer.querySelector('canvas');
+    if (canvas) {
+        canvas.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomLevel / 10000})`;
+    }
 }
 
 function renderSpaces(ctx) {
@@ -468,14 +483,31 @@ function getCellColor(cellType) {
 }
 
 function handleMouseDown(e) {
+    const { row, col } = getCellCoordinates(e);
+    
     if (e.button === 2) { // Right mouse button
-        isDragging = true;
-        lastMouseX = e.clientX;
-        lastMouseY = e.clientY;
+        if (start && start.row === row && start.col === col && start.floor === currentFloor) {
+            start = null;
+            renderGrid(bufferedGridData.grids[currentFloor]);
+        } else if (goals.some(goal => goal.row === row && goal.col === col && goal.floor === currentFloor)) {
+            goals = goals.filter(goal => !(goal.row === row && goal.col === col && goal.floor === currentFloor));
+            renderGrid(bufferedGridData.grids[currentFloor]);
+        } else {
+            isDragging = true;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+        }
         e.preventDefault();
     } else if (e.button === 0) { // Left mouse button
-        const { row, col } = getCellCoordinates(e);
-        startPainting(row, col);
+        if (currentType === 'start') {
+            start = { floor: currentFloor, row, col };
+            renderGrid(bufferedGridData.grids[currentFloor]);
+        } else if (currentType === 'goal') {
+            goals.push({ floor: currentFloor, row, col });
+            renderGrid(bufferedGridData.grids[currentFloor]);
+        } else {
+            startPainting(row, col);
+        }
     }
 }
 
@@ -483,11 +515,11 @@ function handleMouseMove(e) {
     if (isDragging) {
         const dx = e.clientX - lastMouseX;
         const dy = e.clientY - lastMouseY;
-        transform = transform.translate(dx, dy);
-        updateTransform();
+        panX += dx;
+        panY += dy;
+        updateCanvasPosition();
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
-        renderGrid(bufferedGridData.grids[currentFloor]);
     } else {
         const { row, col } = getCellCoordinates(e);
         if (isMouseDown) {
@@ -517,21 +549,28 @@ function handleMouseLeave(e) {
 function handleWheel(e) {
     e.preventDefault();
     const delta = e.deltaY;
-    const scaleFactor = delta > 0 ? 0.9 : 1.1;
+    const zoomSpeed = 0.1;
+    
+    const oldZoom = zoomLevel;
+    if (delta > 0) {
+        zoomLevel = Math.max(100, zoomLevel - zoomLevel * zoomSpeed);
+    } else {
+        zoomLevel = Math.min(25000, zoomLevel + zoomLevel * zoomSpeed);
+    }
+
+    const zoomFactor = zoomLevel / oldZoom;
 
     const rect = gridContainer.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
 
-    // Translate to the mouse position, scale, then translate back
-    transform = transform
-        .translate(mouseX, mouseY)
-        .scale(scaleFactor)
-        .translate(-mouseX, -mouseY);
+    // Adjust pan to zoom from cursor position
+    panX = mouseX - (mouseX - panX) * zoomFactor;
+    panY = mouseY - (mouseY - panY) * zoomFactor;
 
-    updateTransform();
-    cellSize *= scaleFactor;
+    cellSize = (zoomLevel / 100) * bufferedGridData.grid_size;
     renderGrid(bufferedGridData.grids[currentFloor]);
+    updateZoomLevel();
 }
 
 function updateCanvasTransform() {
@@ -556,14 +595,14 @@ function handleGridMouseOut() {
 
 function getCellCoordinates(e) {
     const rect = gridContainer.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const scaleX = gridContainer.querySelector('canvas').width / rect.width;
+    const scaleY = gridContainer.querySelector('canvas').height / rect.height;
 
-    // Use the inverse transform to convert screen coordinates to world coordinates
-    const point = inverseTransform.transformPoint(new DOMPoint(x, y));
+    const x = (e.clientX - rect.left - panX) * scaleX / (zoomLevel / 10000);
+    const y = (e.clientY - rect.top - panY) * scaleY / (zoomLevel / 10000);
 
-    const col = Math.floor(point.x / cellSize);
-    const row = Math.floor(point.y / cellSize);
+    const col = Math.floor(x / cellSize);
+    const row = Math.floor(y / cellSize);
 
     return { row, col };
 }
@@ -1194,14 +1233,30 @@ async function detectExits() {
 }
 
 function handleZoomChange(e) {
+    const oldZoom = zoomLevel;
     zoomLevel = parseInt(e.target.value);
+    const zoomFactor = zoomLevel / oldZoom;
+
+    const rect = gridContainer.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+
+    // Calculate the center of the grid in world space
+    const center = inverseTransform.transformPoint(new DOMPoint(centerX, centerY));
+
+    // Update the transform
+    transform = transform.translate(center.x, center.y)
+                         .scale(zoomFactor)
+                         .translate(-center.x, -center.y);
+
     cellSize = (zoomLevel / 100) * bufferedGridData.grid_size;
-    updateZoomLevel();
     renderGrid(bufferedGridData.grids[currentFloor]);
+    updateZoomLevel();
 }
 
 function updateZoomLevel() {
-    document.getElementById('zoom-level').textContent = `${zoomLevel/100}%`;
+    document.getElementById('zoom-level').textContent = `${(zoomLevel / 100).toFixed(2)}%`;
+    zoomSlider.value = zoomLevel;
 }
 
 function handleBrushSizeChange(e) {
