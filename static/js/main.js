@@ -221,6 +221,8 @@ function initializeGrid() {
     console.log('Set zoom level and cell size:', zoomLevel, cellSize);
 
     zoomSlider.value = zoomLevel;
+    document.getElementById('hidden1').hidden = false;
+    document.getElementById('hidden2').hidden = false;
     updateZoomLevel();
     renderGrid(bufferedGridData.grids[currentFloor]);
     updateFloorDisplay();
@@ -948,7 +950,7 @@ async function findPath() {
         const data = await response.json();
         if (response.ok) {
             pathData = data.path;
-            displayPathResult(data.path_lengths);
+            //displayPathResult(data.path_lengths);
             renderGrid(bufferedGridData.grids[currentFloor]);
         } else {
             showError(`Pathfinding error: ${data.error}`);
