@@ -304,7 +304,8 @@ class IFCProcessor:
 
         for x in range(start_x, end_x + 1):
             for y in range(start_y, end_y + 1):
-                self.grids[floor_index][x, y] = 'stair'
+                if self.grids[floor_index][x, y] not in ['door', 'wall']:
+                    self.grids[floor_index][x, y] = 'stair'
 
     def get_element_type(self, element: ifcopenshell.entity_instance) -> str:
         if element.is_a() in WALL_TYPES:
@@ -335,10 +336,9 @@ class IFCProcessor:
             for x in range(start_x, end_x + 1):
                 for y in range(start_y, end_y + 1):
                     current = grid[x, y]
-                    if element_type == 'door' or (element_type == 'stair' and current != 'door') or (
-                            element_type == 'wall' and current not in ['door', 'stair']):
-                        grid[x, y] = element_type
-                    if element_type == 'floor' and current == 'empty':
+                    if element_type == 'door' or (element_type == 'wall' and current != 'door') or (
+                            element_type == 'stair' and current not in ['door', 'wall']) or (
+                            element_type == 'floor' and current == 'empty'):
                         grid[x, y] = element_type
 
     def trim_grids(self, padding: int = 1) -> None:
