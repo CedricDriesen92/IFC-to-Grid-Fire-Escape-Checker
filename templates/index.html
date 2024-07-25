@@ -141,6 +141,14 @@
                     <input type="checkbox" id="include-empty-tiles" class="form-checkbox">
                     <label for="include-empty-tiles" class="text-sm">Include empty tiles in spaces</label>
                 </div>
+                <div class="flex items-center space-x-2">
+                    <input type="checkbox" id="show-buffer" checked class="form-checkbox">
+                    <label for="show-buffer" class="text-sm">Show wall buffer</label>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <input type="checkbox" id="show-spaces" checked class="form-checkbox">
+                    <label for="show-spaces" class="text-sm">Show spaces</label>
+                </div>
                 
                 <div class="flex items-center space-x-2">
                     <input type="checkbox" id="allow-diagonal" name="allow-diagonal" checked class="form-checkbox">
@@ -151,7 +159,7 @@
                     <label for="minimize-cost" class="text-sm">Minimize Cost</label>
                 </div>
                 <div class="flex items-center space-x-2">
-                    <label for="max-stair-distance" class="text-sm">Max Stair Distance:</label>
+                    <label for="max-stair-distance" class="text-sm">Max Stair/Exit Distance:</label>
                     <input type="range" id="max-stair-distance" min="0" max="100" value="30" step="1" class="w-24">
                     <span id="max-stair-distance-display" class="text-sm">30 m</span>
                 </div>
@@ -183,6 +191,8 @@
     <div id="result" class="fixed bottom-4 left-4 bg-dark-200 p-4 rounded-lg shadow-lg z-20 max-w-md"></div>
     <div id="path-lengths" class="fixed bottom-4 left-4 bg-dark-200 p-4 rounded-lg shadow-lg z-20 max-w-md"></div>
     </div>
+
+    <div id="violations" class="fixed top-4 right-4 bg-dark-200 p-4 rounded-lg shadow-lg z-20 max-w-md overflow-y-auto max-h-[80vh]"></div>
 
     <script src="/static/js/main.js"></script>
 </body>

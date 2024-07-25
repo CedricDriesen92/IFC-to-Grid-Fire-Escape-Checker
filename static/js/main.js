@@ -15,7 +15,7 @@ let lastPaintedCell = null;
 let lastPreviewCell = null;
 let previewCells = new Set();
 let isMouseDown = false;
-let wallBuffer = 0;
+let wallBuffer = 4;
 let paintedCells = new Set();
 let pathfindingSteps = [];
 let currentStepIndex = 0;
@@ -35,6 +35,30 @@ let panX = 0;
 let panY = 0;
 let transform = new DOMMatrix();
 let inverseTransform = new DOMMatrix();
+let showBuffer = true;
+let showSpaces = true;
+
+const MAX_TRAVEL_DISTANCES = {
+    daytime: {
+        toEvacRoute: 30,
+        toNearestExit: 45,
+        toSecondExit: 80
+    },
+    nighttime: {
+        toEvacRoute: 10,//20,
+        toNearestExit: 15,//30,
+        toSecondExit: 60
+    }
+};
+const MAX_DEAD_END_LENGTH = 15;
+const MIN_WIDTHS = {
+    evacuationRoute: 0.8,
+    door: 0.8,
+    escapeTerrace: 0.6
+};
+const MIN_STAIRWAY_WIDTH = 0.8;
+const MIN_STAIRWAY_DISTANCE = 10;
+const MAX_STAIRWAY_DISTANCE = 60;
 
 // DOM elements
 const gridContainer = document.getElementById('grid-container');
@@ -46,6 +70,8 @@ const fileUploadForm = document.getElementById('file-upload-form');
 const zoomSlider = document.getElementById('zoom-slider');
 const brushSizeSlider = document.getElementById('brush-size');
 const wallBufferSlider = document.getElementById('wall-buffer');
+document.getElementById('wall-buffer-display').textContent = '0.4';
+wallBufferSlider.value = 4;
 const allowDiagonalCheckbox = document.getElementById('allow-diagonal');
 const minimizeCostCheckbox = document.getElementById('minimize-cost');
 const exportPathButton = document.getElementById('export-path');
@@ -54,6 +80,8 @@ const spaceDetectionButton = document.getElementById('update-spaces');
 const maxStairDistanceSlider = document.getElementById('max-stair-distance');
 const maxStairDistanceDisplay = document.getElementById('max-stair-distance-display');
 const outputText = document.getElementById('result');
+const showBufferCheckbox = document.getElementById('show-buffer');
+const showSpacesCheckbox = document.getElementById('show-spaces');
 
 // Event listeners
 fileUploadForm.addEventListener('submit', uploadFile);
@@ -81,6 +109,14 @@ document.getElementById('include-empty-tiles').addEventListener('change', (e) =>
 spaceDetectionButton.addEventListener('click', updateSpaces);
 maxStairDistanceSlider.addEventListener('input', handleMaxStairDistanceChange);
 gridContainer.addEventListener('wheel', handleWheel);
+showBufferCheckbox.addEventListener('change', (e) => {
+    showBuffer = e.target.checked;
+    renderGrid(bufferedGridData.grids[currentFloor]);
+});
+showSpacesCheckbox.addEventListener('change', (e) => {
+    showSpaces = e.target.checked;
+    renderGrid(bufferedGridData.grids[currentFloor]);
+});
 
 document.getElementById('paint-tool').addEventListener('click', () => setCurrentTool('paint'));
 document.getElementById('fill-tool').addEventListener('click', () => setCurrentTool('fill'));
@@ -226,6 +262,7 @@ function initializeGrid() {
     updateZoomLevel();
     renderGrid(bufferedGridData.grids[currentFloor]);
     updateFloorDisplay();
+    applyWallBuffer();
 }
 
 function renderGrid(grid) {
@@ -240,16 +277,20 @@ function renderGrid(grid) {
     grid.forEach((row, i) => {
         row.forEach((cell, j) => {
             ctx.fillStyle = getCellColor(cell);
+            if(cell == 'walla' && !showBuffer){
+                ctx.fillStyle = getCellColor(originalGridData.grids[currentFloor][i][j]);
+            }
             ctx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
         });
     });
 
     // Render spaces
-    renderSpaces(ctx);
-
+    if(showSpaces){
+        renderSpaces(ctx);
+    }
     // Render path if it exists
-    if (pathData) {
-        console.log(pathData);
+    if (pathData && !foundEscapeRoutes) {
+        //console.log(pathData);
         ctx.fillStyle = 'rgba(255, 255, 0, 0.5)';
         pathData.forEach(point => {
             if (point[2] === currentFloor) {
@@ -258,12 +299,17 @@ function renderGrid(grid) {
         });
     }
 
-    if (foundEscapeRoutes) {
+    if (foundEscapeRoutes && foundEscapeRoutes.length >= 1) {
+        console.log(foundEscapeRoutes);
         let totalLength = 0;
         let stairwayDistance = -1;
         let spacesOverMaxDistance = [];
         let spacesWithoutExits = [];
         foundEscapeRoutes.forEach(route => {
+            console.log(route);
+            console.log(route['distance']);
+            console.log(route.distance);
+            let hasViolations = false;
             if (route.distance){
                 totalLength = Math.max(totalLength, route.distance);
                 stairwayDistance = Math.max(stairwayDistance, route.distance_to_stair);
@@ -277,7 +323,13 @@ function renderGrid(grid) {
                     outputText.innerHTML.concat("\nSpace: ", route.space_name, "\nDistance to closest escape is too long: ", route.distance);
                 }
                 ctx.strokeStyle = isOverMaxDistance ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 255, 0, 0.8)';
+                ctx.setLineDash([]);
                 ctx.lineWidth = 4;
+                if (route && route.violations && (route.violations['daytime'].length > 0 || route.violations['nighttime'].length > 0)) {
+                    hasViolations = true;
+                    ctx.setLineDash([5,5]);
+                    ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
+                }
                 ctx.beginPath();
                 route.optimal_path.forEach((point, index) => {
                     if (point[2] === currentFloor) {
@@ -340,17 +392,6 @@ function renderGrid(grid) {
     updateCanvasPosition();
 }
 
-function transformRect(rect, matrix) {
-    const topLeft = matrix.transformPoint(new DOMPoint(rect.left, rect.top));
-    const bottomRight = matrix.transformPoint(new DOMPoint(rect.right, rect.bottom));
-    return new DOMRect(
-        Math.min(topLeft.x, bottomRight.x),
-        Math.min(topLeft.y, bottomRight.y),
-        Math.abs(bottomRight.x - topLeft.x),
-        Math.abs(bottomRight.y - topLeft.y)
-    );
-}
-
 function updateCanvasPosition() {
     const canvas = gridContainer.querySelector('canvas');
     if (canvas) {
@@ -361,36 +402,23 @@ function updateCanvasPosition() {
 function renderSpaces(ctx) {
     const currentFloorSpaces = spacesData.filter(space => space.floor === currentFloor);
 
-    console.log('Rendering spaces for floor:', currentFloor, ' number: ', currentFloorSpaces.length);
+    //console.log('Rendering spaces for floor:', currentFloor, ' number: ', currentFloorSpaces.length);
     
     currentFloorSpaces.forEach((space, index) => {
         if (!spaceColors[space.id]) {
             spaceColors[space.id] = generateRandomColor();
         }
-        if (foundEscapeRoutes){
+        let hasViolations = false;
+        if (foundEscapeRoutes) {
             const route = foundEscapeRoutes.find(r => r.space_name === space.name);
-            if (route && route.distance){
-                ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-                ctx.lineWidth = 2;
-                ctx.fillStyle = spaceColors[space.id];
-            }
-            else if(route){
-                ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-                ctx.lineWidth = 2;
-                ctx.fillStyle = 'rgba(255, 0, 0, 0.6)';
-            }
-            else{
-                ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-                ctx.lineWidth = 2;
-                ctx.fillStyle = spaceColors[space.id];
+            if (route && route.violations && (route.violations['daytime'].length > 0 || route.violations['nighttime'].length > 0)) {
+                hasViolations = true;
             }
         }
-        else{
-            ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
-            ctx.lineWidth = 2;
-            ctx.fillStyle = spaceColors[space.id];
-        }
-        
+
+        ctx.strokeStyle = hasViolations ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.8)';
+        ctx.lineWidth = hasViolations ? 3 : 2;
+        ctx.fillStyle = spaceColors[space.id];
         if (!space.polygon || space.polygon.length === 0) {
             console.warn(`Space ${space.id} has no polygon`);
             return;
@@ -423,7 +451,7 @@ function renderSpaces(ctx) {
         ctx.fillText(space.name, textX, textY);
         
         if (foundEscapeRoutes) {
-            foundEscapeRoutes.forEach(r=>console.log(r.space_name, " ", space.name));
+            //foundEscapeRoutes.forEach(r=>console.log(r.space_name, " ", space.name));
             const route = foundEscapeRoutes.find(r => r.space_name === space.name);
             if (route && route.distance) {
                 ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
@@ -573,11 +601,6 @@ function handleWheel(e) {
     cellSize = (zoomLevel / 100) * bufferedGridData.grid_size;
     renderGrid(bufferedGridData.grids[currentFloor]);
     updateZoomLevel();
-}
-
-function updateCanvasTransform() {
-    const canvas = gridContainer.querySelector('canvas');
-    canvas.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomFactor})`;
 }
 
 function handleGridHover(e) {
@@ -950,7 +973,6 @@ async function findPath() {
         const data = await response.json();
         if (response.ok) {
             pathData = data.path;
-            //displayPathResult(data.path_lengths);
             renderGrid(bufferedGridData.grids[currentFloor]);
         } else {
             showError(`Pathfinding error: ${data.error}`);
@@ -959,22 +981,6 @@ async function findPath() {
         console.error('Error:', error);
         showError(`An error occurred while finding the path: ${error.message}`);
     }
-}
-
-function displayPathResult(pathLengths) {
-    let resultHTML = `<h3>Path Lengths:</h3>
-                      <p>Total length: ${pathLengths.total_length.toFixed(2)} meters</p>
-                      <p>Distance to stairway: ${pathLengths.stairway_distance.toFixed(2)} meters</p>
-                      <h4>Floor-wise lengths:</h4>
-                      <ul>`;
-    
-    for (const [floor, length] of Object.entries(pathLengths.floor_lengths)) {
-        resultHTML += `<li>Floor ${parseInt(floor.split('_')[1]) + 1}: ${length.toFixed(2)} meters</li>`;
-    }
-    
-    resultHTML += '</ul>';
-    
-    document.getElementById('result').innerHTML = resultHTML;
 }
 
 function highlightPath(path) {
@@ -1013,6 +1019,7 @@ async function calculateEscapeRoutes() {
     }
 
     foundEscapeRoutes = [];
+    let spacesWithViolations = [];
     let totalLength = 0;
     let stairwayDistance = -1;
     let spacesOverMaxDistance = [];
@@ -1048,6 +1055,13 @@ async function calculateEscapeRoutes() {
             const data = await response.json();
             foundEscapeRoutes.push(data.escape_route);
 
+            // Check rules
+            violations = data.escape_route.violations;
+            //console.log(violations)
+            if (violations['daytime'].length > 0 || violations['nighttime'].length > 0) {
+                spacesWithViolations.push({space: space.name, violations});
+            }
+
             // Update statistics
             if (data.escape_route.distance) {
                 totalLength = data.escape_route.distance;
@@ -1060,11 +1074,12 @@ async function calculateEscapeRoutes() {
             }
 
             // Render the current progress
+            displayViolations(spacesWithViolations);
             renderGrid(bufferedGridData.grids[currentFloor]);
 
         } catch (error) {
             console.error('Error:', error);
-            showError(`An error occurred while calculating escape route for space ${space.name}: ${error.message}`);
+            //showError(`An error occurred while calculating escape route for space ${space.name}: ${error.message}`);
         }
     }
 
@@ -1081,6 +1096,30 @@ async function calculateEscapeRoutes() {
     `;
 
     renderGrid(bufferedGridData.grids[currentFloor]);
+}
+
+function displayViolations(spacesWithViolations) {
+    const violationsElement = document.getElementById('violations');
+    if (spacesWithViolations.length === 0) {
+        violationsElement.innerHTML = '<p>No rule violations found.</p>';
+        return;
+    }
+
+    let violationsHTML = '<h3 class="text-lg font-semibold mb-2">Rule Violations:</h3>';
+    spacesWithViolations.forEach(({space, violations}) => {
+        violationsHTML += `<h4 class="text-md font-semibold mt-2">${space}:</h4>`;
+        for (const [timeOfDay, violationList] of Object.entries(violations)) {
+            if (violationList.length > 0) {
+                violationsHTML += `<h5 class="text-sm font-semibold mt-1">${timeOfDay}:</h5><ul class="list-disc pl-5">`;
+                violationList.forEach(violation => {
+                    violationsHTML += `<li class="text-sm">${violation}</li>`;
+                });
+                violationsHTML += '</ul>';
+            }
+        }
+    });
+
+    violationsElement.innerHTML = violationsHTML;
 }
 
 function handleMaxStairDistanceChange(e) {
@@ -1442,7 +1481,6 @@ function init() {
     document.getElementById('brush-size-display').textContent = brushSize;
     const initialBufferSize = wallBuffer * bufferedGridData.grid_size;
     document.getElementById('wall-buffer-display').textContent = initialBufferSize.toFixed(2);
-
 }
 
 // Call the init function when the DOM is fully loaded

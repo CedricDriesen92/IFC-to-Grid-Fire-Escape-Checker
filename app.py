@@ -4,7 +4,7 @@ import os
 from typing import List, Dict, Tuple, Any
 from ifc_processing import process_ifc_file
 from grid_management import GridManager, validate_grid_data
-from pathfinding import find_path, detect_exits, calculate_escape_route
+from pathfinding import find_path, detect_exits, calculate_escape_route, check_escape_route_rules
 import json
 
 import logging
@@ -176,6 +176,7 @@ def detect_spaces_route() -> tuple[Dict[str, Any], int]:
 def api_calculate_escape_route():
     data = request.json
     try:
+        grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
         escape_route = calculate_escape_route(
             data['grids'],
             data['grid_size'],
@@ -185,8 +186,14 @@ def api_calculate_escape_route():
             data['exits'],
             data['allow_diagonal']
         )
+        
+        # Add rule checking here
+        violations = check_escape_route_rules(escape_route, data['grid_size'])
+        escape_route['violations'] = violations
+
         return jsonify({'escape_route': escape_route})
     except Exception as e:
+        app.logger.error(f"Error calculating escape route: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 400
 
 @app.route('/static/<path:path>')

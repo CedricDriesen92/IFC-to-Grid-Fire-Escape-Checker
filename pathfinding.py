@@ -245,7 +245,7 @@ class Pathfinder:
                 'optimal_exit': optimal_exit,
                 'optimal_path': optimal_path,
                 'distance': max_distance * self.grid_size,  # Convert to real-world distance
-                'distance_to_stair': distance_to_stair * self.grid_size if distance_to_stair <= -1 else -1,  # Convert to real-world distance or keep as -1
+                'distance_to_stair': distance_to_stair * self.grid_size if distance_to_stair > 0 else -1,  # Convert to real-world distance or keep as -1
                 'space_name': space['name']
             }
         else:
@@ -308,3 +308,48 @@ def calculate_escape_route(grids: List[List[List[str]]], grid_size: float, floor
                            allow_diagonal: bool = False) -> Dict[str, Any]:
     pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal)
     return pathfinder.calculate_escape_route(space, exits)
+
+def check_escape_route_rules(route, grid_size):
+    violations = {
+        'daytime': [],
+        'nighttime': []
+    }
+
+    max_travel_distances = {
+        'daytime': {
+            'toEvacRoute': 30,
+            'toNearestExit': 45,
+            'toSecondExit': 80
+        },
+        'nighttime': {
+            'toEvacRoute': 10,
+            'toNearestExit': 15,
+            'toSecondExit': 60
+        }
+    }
+    print("Distance to stair:")
+    print(route['distance_to_stair'])
+    print("Distance to exit:")
+    print(route['distance'])
+    for time_of_day in ['daytime', 'nighttime']:
+        if route['distance_to_stair'] > max_travel_distances[time_of_day]['toEvacRoute']:
+            violations[time_of_day].append(f"Distance to evacuation route ({route['distance_to_stair']:.2f}m) exceeds maximum ({max_travel_distances[time_of_day]['toEvacRoute']}m)")
+        
+        if route['distance'] > max_travel_distances[time_of_day]['toNearestExit']:
+            violations[time_of_day].append(f"Distance to nearest exit ({route['distance']:.2f}m) exceeds maximum ({max_travel_distances[time_of_day]['toNearestExit']}m)")
+
+    # Check dead-end length (if available)
+    if 'dead_end_length' in route and route['dead_end_length'] > 15:
+        violations['daytime'].append(f"Dead-end length ({route['dead_end_length']:.2f}m) exceeds maximum (15m)")
+        violations['nighttime'].append(f"Dead-end length ({route['dead_end_length']:.2f}m) exceeds maximum (15m)")
+
+    # Check stairway distance (if available)
+    if 'stairway_distance' in route:
+        if route['stairway_distance'] < 10:
+            violations['daytime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) is less than minimum (10m)")
+            violations['nighttime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) is less than minimum (10m)")
+        elif route['stairway_distance'] > 60:
+            violations['daytime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) exceeds maximum (60m)")
+            violations['nighttime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) exceeds maximum (60m)")
+    print(violations)
+    return violations
