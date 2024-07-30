@@ -12,9 +12,11 @@ The program works in three steps:
 To do:
 - Make able to call via command line, easy since everything is already automatic.
 - Automatically create a validation report, incl figures/spaces that violate which rules/whatever is necessary for the designer.
+- Fix JSON import/export.
 - Detect stairways for better length calculation, should be any space containing a stair (wall buffer taken into account), simple.
-- Try again to align spaces with the IfcSpace, but their geometry doesn't seem to line up correctly...
+- Try again to align spaces with the IfcSpace, but their geometry doesn't seem to line up correctly... Maybe mix calculating the spaces myself and extracting the IFC properties of its closest matching IfcSpace?
 - Create a line tool for painting...
 - Give stairs connected to other floors a different hue, to indicate this.
-- Make stairs not enterable from the sides! Taking longest side as the direction of the stair works mostly but not always, since the part of the stair on one floor can be small and create a wrong direction. Using the connection should work (find out which direction is connected all the way, then rotate 90 degrees to find stair direction), but could give issues with rotating stairs...
+- Make stairs not enterable from the sides! Taking longest side as the direction of the stair works mostly but not always, since the part of the stair on one floor can be small and create a wrong direction. Using the connection should work (find out which direction is connected all the way, then rotate 90 degrees to find stair direction), but could give issues with rotating stairs... Any indication from IFC we could import?
 - Check for a visibility graph version, since for large IFC files with many rooms a grid pathfinder (esp with many floors) can be slow. Maybe a hybrid approach where the grid inside a space is transformed into a visibility graph, connected via doors, to be explored.
+- Try to do something similar for point clouds / Gaussian Splats / NERF... But maybe less ambitious.
