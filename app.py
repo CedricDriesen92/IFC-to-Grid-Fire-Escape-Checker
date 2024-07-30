@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template, send_from_directory, redirect
 from werkzeug.utils import secure_filename
 import os
 from typing import List, Dict, Tuple, Any
@@ -6,6 +6,9 @@ from ifc_processing import process_ifc_file
 from grid_management import GridManager, validate_grid_data
 from pathfinding import find_path, detect_exits, calculate_escape_route, check_escape_route_rules
 import json
+import webbrowser
+from threading import Timer
+
 
 import logging
 import sys, traceback
@@ -14,7 +17,12 @@ import sys, traceback
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+if getattr(sys, 'frozen', False):
+    template_folder = os.path.join(sys._MEIPASS, 'templates')
+    static_folder = os.path.join(sys._MEIPASS, 'static')
+    app = Flask(__name__, template_folder=template_folder, static_folder=static_folder)
+else:
+    app = Flask(__name__)
 app.config.from_object('config')
 
 @app.route('/')
@@ -203,5 +211,9 @@ def send_static(path: str) -> Any:
 def allowed_file(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
+def open_browser():
+      webbrowser.open_new("http://localhost:8000")
+
 if __name__ == '__main__':
-    app.run(debug=app.config['DEBUG'])
+    Timer(1, open_browser).start()
+    app.run(host='localhost', debug=app.config['DEBUG'], port=8000)
