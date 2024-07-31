@@ -115,10 +115,10 @@ def apply_wall_buffer() -> Tuple[Dict[str, Any], int]:
             'original_grids': grid_manager.get_original_grids()
         }), 200
     except ValueError as e:
-        app.logger.error(f"Validation error: {str(e)}", exc_info=True)
+        logger.error(f"Validation error: {str(e)}", exc_info=True)
         return jsonify({'error': f'Invalid input data: {str(e)}'}), 400
     except Exception as e:
-        app.logger.error(f"Error applying wall buffer: {str(e)}", exc_info=True)
+        logger.error(f"Error applying wall buffer: {str(e)}", exc_info=True)
         return jsonify({'error': f'An error occurred while applying wall buffer: {str(e)}'}), 500
 
 @app.route('/api/update-cell', methods=['POST'])
@@ -167,7 +167,7 @@ def detect_exits_route() -> tuple[Dict[str, Any], int]:
     except Exception as e:
         app.logger.error(f"Error detecting exits: {str(e)}")
         return jsonify({'error': f'An error occurred while detecting exits: {str(e)}'}), 500
-    
+
 @app.route('/api/update-spaces', methods=['POST'])
 def detect_spaces_route() -> tuple[Dict[str, Any], int]:
     data = request.json
@@ -176,15 +176,29 @@ def detect_spaces_route() -> tuple[Dict[str, Any], int]:
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
         spaces = grid_manager.detect_spaces(data.get('include_empty_tiles', False))
         return jsonify({'spaces': spaces}), 200
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Invalid input data: {str(e)}'}), 400
     except Exception as e:
-        app.logger.error(f"Error detecting spaces: {str(e)}", exc_info=True)
+        logger.error(f"Error detecting spaces: {str(e)}", exc_info=True)
         return jsonify({'error': f'An error occurred while detecting spaces: {str(e)}'}), 500
     
 @app.route('/api/calculate-escape-route', methods=['POST'])
 def api_calculate_escape_route():
     data = request.json
+    logger.debug(f"Received data for escape route calculation: {data}")
     try:
+        validate_grid_data(data['grids'], data['grid_size'], data['floors'], data['bbox'])
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        
+        # Ensure space data is valid
+        if not data['space'] or 'id' not in data['space']:
+            raise ValueError("Invalid space data")
+        
+        # Ensure exits data is valid
+        if not data['exits'] or not all(len(exit) == 3 for exit in data['exits']):
+            raise ValueError("Invalid exits data")
+
         escape_route = calculate_escape_route(
             data['grids'],
             data['grid_size'],
@@ -199,10 +213,15 @@ def api_calculate_escape_route():
         violations = check_escape_route_rules(escape_route, data['grid_size'])
         escape_route['violations'] = violations
 
+        logger.debug(f"Calculated escape route for space {data['space']['id']}")
         return jsonify({'escape_route': escape_route})
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Invalid input data: {str(e)}'}), 400
     except Exception as e:
-        app.logger.error(f"Error calculating escape route: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 400
+        logger.error(f"Error calculating escape route: {str(e)}", exc_info=True)
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/static/<path:path>')
 def send_static(path: str) -> Any:

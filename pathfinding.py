@@ -3,6 +3,12 @@ import numpy as np
 from typing import List, Tuple, Dict, Any
 from collections import defaultdict
 
+import logging
+import traceback
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 class Pathfinder:
     def __init__(self, grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = True):
         self.grids = grids
@@ -193,70 +199,83 @@ class Pathfinder:
         return path, path_lengths
     
     def calculate_escape_route(self, space: Dict[str, Any], exits: List[Tuple[int, int, int]]) -> Dict[str, Any]:
-        print(space['name'])
-        candidate_points = self._select_candidate_points(space)
-        print(candidate_points)
-        
-        max_distance = 0
-        furthest_point = None
-        optimal_exit = None
-        optimal_path = None
-        distance_to_stair = -1  # Initialize to -1
+        try:
+            logger.debug(f"Calculating escape route for space: {space['name']}")
+            candidate_points = self._select_candidate_points(space)
+            logger.debug(f"Candidate points: {candidate_points}")
+            
+            max_distance = 0
+            furthest_point = None
+            optimal_exit = None
+            optimal_path = None
+            distance_to_stair = -1
 
-        for point in candidate_points:
-            min_exit_distance = float('inf')
-            best_exit = None
-            best_path = None
-            current_distance_to_stair = -1  # Initialize to -1 for each point
-
-            for exit in exits:
-                exit = (exit[0], exit[1], exit[2])
-                try:
-                    if point not in self.graph:
-                        print("point not in graph")
-                    if exit not in self.graph:
-                        print("exit not in graph") 
-                    path = nx.astar_path(self.graph, point, exit, heuristic=self._heuristic, weight='weight')
-                    distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(len(path)-1))
-                    
-                    # Calculate distance to first stair
-                    stair_index = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), -1)
-                    if stair_index != -1:
-                        stair_distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(stair_index))
-                        current_distance_to_stair = stair_distance if current_distance_to_stair == -1 else min(current_distance_to_stair, stair_distance)
-                    
-                    if distance < min_exit_distance:
-                        min_exit_distance = distance
-                        best_exit = exit
-                        best_path = path
-                except nx.NetworkXNoPath:
+            for point in candidate_points:
+                if point not in self.graph:
+                    logger.warning(f"Point {point} not in graph for space {space['name']}")
                     continue
 
-            if min_exit_distance > max_distance:
-                max_distance = min_exit_distance
-                furthest_point = point
-                optimal_exit = best_exit
-                optimal_path = best_path
-                distance_to_stair = current_distance_to_stair
+                min_exit_distance = float('inf')
+                best_exit = None
+                best_path = None
+                current_distance_to_stair = -1
 
-        if furthest_point and optimal_exit:
-            return {
-                'furthest_point': furthest_point,
-                'optimal_exit': optimal_exit,
-                'optimal_path': optimal_path,
-                'distance': max_distance * self.grid_size,  # Convert to real-world distance
-                'distance_to_stair': distance_to_stair * self.grid_size if distance_to_stair > 0 else -1,  # Convert to real-world distance or keep as -1
-                'space_name': space['name']
-            }
-        else:
-            return {
-                'furthest_point': None,
-                'optimal_exit': None,
-                'optimal_path': None,
-                'distance': None,
-                'distance_to_stair': None,
-                'space_name': space['name']
-            }
+                for exit in exits:
+                    exit = (exit[0], exit[1], exit[2])
+                    if exit not in self.graph:
+                        logger.warning(f"Exit {exit} not in graph")
+                        continue
+
+                    try:
+                        path = nx.astar_path(self.graph, point, exit, heuristic=self._heuristic, weight='weight')
+                        distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(len(path)-1))
+                        
+                        stair_index = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), -1)
+                        if stair_index != -1:
+                            stair_distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(stair_index))
+                            current_distance_to_stair = stair_distance if current_distance_to_stair == -1 else min(current_distance_to_stair, stair_distance)
+                        
+                        if distance < min_exit_distance:
+                            min_exit_distance = distance
+                            best_exit = exit
+                            best_path = path
+                    except nx.NetworkXNoPath:
+                        logger.warning(f"No path found from {point} to exit {exit}")
+                        continue
+
+                if min_exit_distance > max_distance:
+                    max_distance = min_exit_distance
+                    furthest_point = point
+                    optimal_exit = best_exit
+                    optimal_path = best_path
+                    distance_to_stair = current_distance_to_stair
+
+            if furthest_point and optimal_exit:
+                result = {
+                    'furthest_point': furthest_point,
+                    'optimal_exit': optimal_exit,
+                    'optimal_path': optimal_path,
+                    'distance': max_distance * self.grid_size,
+                    'distance_to_stair': distance_to_stair * self.grid_size if distance_to_stair > 0 else -1,
+                    'space_name': space['name']
+                }
+            else:
+                result = {
+                    'furthest_point': None,
+                    'optimal_exit': None,
+                    'optimal_path': None,
+                    'distance': None,
+                    'distance_to_stair': None,
+                    'space_name': space['name']
+                }
+
+            logger.debug(f"Escape route calculation result for space {space['name']}: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Error in calculate_escape_route for space {space['name']}: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+
     
     def _select_candidate_points(self, space: Dict[str, Any]) -> List[Tuple[int, int, int]]:
         points = np.array(space['points'])
@@ -306,8 +325,20 @@ def detect_exits(grids: List[List[List[str]]], grid_size: float, floors: List[Di
 def calculate_escape_route(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], 
                            bbox: Dict[str, float], space: Dict[str, Any], exits: List[Tuple[int, int, int]], 
                            allow_diagonal: bool = False) -> Dict[str, Any]:
-    pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal)
-    return pathfinder.calculate_escape_route(space, exits)
+    try:
+        logger.debug(f"Calculating escape route for space: {space['name']}")
+        logger.debug(f"Grid size: {grid_size}, Floors: {floors}, Bbox: {bbox}")
+        logger.debug(f"Exits: {exits}, Allow diagonal: {allow_diagonal}")
+        
+        pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal)
+        result = pathfinder.calculate_escape_route(space, exits)
+        
+        logger.debug(f"Escape route calculation result: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Error in calculate_escape_route: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 def check_escape_route_rules(route, grid_size):
     violations = {

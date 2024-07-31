@@ -134,22 +134,30 @@ class GridManager:
             raise ValueError("Cannot remove the specified floor")
 
     def apply_wall_buffer(self, buffer_distance: int) -> List[List[List[str]]]:
-        for floor, original_grid in enumerate(self.original_grids):
-            buffered_grid = original_grid.copy()
-            wall_mask = (original_grid == 'wall')
-            
-            for _ in range(buffer_distance):
-                wall_mask = self._expand_mask(wall_mask)
+        logger.debug(f"Applying wall buffer with distance: {buffer_distance}")
+        logger.debug(f"Original grids shape: {[grid.shape for grid in self.original_grids]}")
+        
+        try:
+            for floor, original_grid in enumerate(self.original_grids):
+                buffered_grid = original_grid.copy()
+                wall_mask = (original_grid == 'wall')
+                
+                for _ in range(buffer_distance):
+                    wall_mask = self._expand_mask(wall_mask)
 
-            rows, cols = wall_mask.shape
-            for i in range(rows):
-                for j in range(cols):
-                    if wall_mask[i, j] and original_grid[i, j] not in ['wall', 'door']:
-                        buffered_grid[i, j] = 'walla'
-            
-            self.buffered_grids[floor] = buffered_grid
+                rows, cols = wall_mask.shape
+                for i in range(rows):
+                    for j in range(cols):
+                        if wall_mask[i, j] and original_grid[i, j] not in ['wall', 'door']:
+                            buffered_grid[i, j] = 'walla'
+                
+                self.buffered_grids[floor] = buffered_grid
 
-        return [grid.tolist() for grid in self.buffered_grids]
+            logger.debug(f"Buffered grids shape: {[grid.shape for grid in self.buffered_grids]}")
+            return [grid.tolist() for grid in self.buffered_grids]
+        except Exception as e:
+            logger.error(f"Error in apply_wall_buffer: {str(e)}", exc_info=True)
+            raise ValueError(f"Error applying wall buffer: {str(e)}")
 
     def _expand_mask(self, mask: np.ndarray) -> np.ndarray:
         expanded = mask.copy()
@@ -182,24 +190,34 @@ class GridManager:
                 0 <= col < self.grids[floor].shape[1])
     
     def detect_spaces(self, include_empty_tiles: bool = False) -> List[Dict[str, Any]]:
-        spaces = []
-        for floor_index, grid in enumerate(self.original_grids):
-            space_id = 0
-            visited = np.zeros_like(grid, dtype=bool)
-            for i in range(grid.shape[0]):
-                for j in range(grid.shape[1]):
-                    if not visited[i, j] and (grid[i, j] == 'floor' or (include_empty_tiles and grid[i, j] == 'empty')):
-                        space_id += 1
-                        space = self._flood_fill(grid, visited, i, j, floor_index, space_id, include_empty_tiles)
-                        if space:
-                            border = self._find_space_borders(grid, space['points'], include_empty_tiles)
-                            volume = len(space['points'])*(self.grid_size ** 2)
-                            area = len(border)*(self.grid_size ** 1)
-                            print("V: " + str(volume) + " area: " + str(area))
-                            if volume > 1:
-                                space['polygon'] = self._create_polygon(border)
-                                spaces.append(space)
-        return spaces
+        logger.debug(f"Detecting spaces with include_empty_tiles: {include_empty_tiles}")
+        logger.debug(f"Original grids shape: {[grid.shape for grid in self.original_grids]}")
+        
+        try:
+            spaces = []
+            for floor_index, grid in enumerate(self.original_grids):
+                space_id = 0
+                visited = np.zeros_like(grid, dtype=bool)
+                for i in range(grid.shape[0]):
+                    for j in range(grid.shape[1]):
+                        if not visited[i, j] and (grid[i, j] == 'floor' or (include_empty_tiles and grid[i, j] == 'empty')):
+                            space_id += 1
+                            space = self._flood_fill(grid, visited, i, j, floor_index, space_id, include_empty_tiles)
+                            if space:
+                                border = self._find_space_borders(grid, space['points'], include_empty_tiles)
+                                volume = len(space['points']) * (self.grid_size ** 2)
+                                area = len(border) * self.grid_size
+                                logger.debug(f"Space {space_id} - Volume: {volume}, Area: {area}")
+                                if volume > 1:
+                                    space['polygon'] = self._create_polygon(border)
+                                    spaces.append(space)
+
+            logger.debug(f"Detected {len(spaces)} spaces")
+            return spaces
+        except Exception as e:
+            logger.error(f"Error in detect_spaces: {str(e)}", exc_info=True)
+            raise ValueError(f"Error detecting spaces: {str(e)}")
+
 
     def _flood_fill(self, grid, visited, i, j, floor_index, space_id, include_empty_tiles):
         stack = [(i, j)]

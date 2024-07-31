@@ -117,6 +117,11 @@ showSpacesCheckbox.addEventListener('change', (e) => {
     showSpaces = e.target.checked;
     renderGrid(bufferedGridData.grids[currentFloor]);
 });
+spaceDetectionButton.addEventListener('click', () => {
+    updateSpaces().catch(error => {
+        showError(`An error occurred while updating spaces: ${error.message}`);
+    });
+});
 
 document.getElementById('paint-tool').addEventListener('click', () => setCurrentTool('paint'));
 document.getElementById('fill-tool').addEventListener('click', () => setCurrentTool('fill'));
@@ -141,6 +146,7 @@ document.getElementById('set-goal').addEventListener('click', () => setCurrentTy
 document.getElementById('find-path').addEventListener('click', findPath);
 //document.getElementById('download-grid').addEventListener('click', downloadGrid);
 document.getElementById('calculate-escape-routes').addEventListener('click', calculateEscapeRoutes);
+document.getElementById('export-grid').addEventListener('click', exportGrid);
 
 function initializeToolMenus() {
     const paintTool = document.getElementById('paint-tool');
@@ -186,28 +192,72 @@ function initializeToolMenus() {
 async function uploadFile(event) {
     event.preventDefault();
     const formData = new FormData(event.target);
+    const file = formData.get('file');
 
     showProgress('Initializing...');
 
     try {
-        const response = await fetch('/api/process-file', {
-            method: 'POST',
-            body: formData
-        });
+        let result;
+        if (file.name.toLowerCase().endsWith('.json')) {
+            // Handle JSON file
+            const fileContent = await file.text();
+            result = JSON.parse(fileContent);
+            handleProcessedData(result);
+        } else {
+            // Handle IFC file
+            const response = await fetch('/api/process-file', {
+                method: 'POST',
+                body: formData
+            });
 
-        if (!response.ok) {
-            throw new Error('Network response was not ok');
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+
+            result = await response.json();
+            handleProcessedData(result);
         }
 
-        const result = await response.json();
-        console.log('Received data from server:', result);
-        handleProcessedData(result);
+        console.log('Received data:', result);
     } catch (error) {
         console.error('Error:', error);
         showError('An error occurred while processing the file.');
     } finally {
         hideProgress();
     }
+}
+
+function exportGrid() {
+    if (!originalGridData) {
+        showError('No grid data available. Please upload or create a grid first.');
+        return;
+    }
+
+    const dataToSave = {
+        grids: originalGridData.grids,
+        grid_size: originalGridData.grid_size,
+        floors: originalGridData.floors,
+        bbox: originalGridData.bbox,
+        unit_size: originalGridData.unit_size,
+        spaces: spacesData
+    };
+
+    const jsonString = JSON.stringify(dataToSave, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+
+    const downloadLink = document.createElement('a');
+    downloadLink.href = url;
+    
+    // Use the original IFC filename if available, otherwise use a default name
+    const originalFilename = fileUploadForm.querySelector('input[type="file"]').files[0]?.name;
+    downloadLink.download = originalFilename ? originalFilename.replace('.ifc', '_edited.json') : 'edited_grid.json';
+
+    document.body.appendChild(downloadLink);
+    downloadLink.click();
+    document.body.removeChild(downloadLink);
+
+    URL.revokeObjectURL(url);
 }
 
 function handleProcessedData(data) {
@@ -235,6 +285,14 @@ function handleProcessedData(data) {
     console.log('Grid data seems valid, initializing grid...');
     initializeGrid();
     initializeToolMenus();
+
+    // Apply wall buffer after initialization
+    applyWallBuffer().then(() => {
+        console.log('Initial wall buffer applied');
+    }).catch(error => {
+        console.error('Error applying initial wall buffer:', error);
+        showError('An error occurred while applying the initial wall buffer. Please try again.');
+    });
 }
 
 function initializeGrid() {
@@ -490,13 +548,12 @@ async function updateSpaces() {
         if (response.ok) {
             spacesData = data.spaces;
             renderGrid(bufferedGridData.grids[currentFloor]);
-            //showMessage('Spaces updated successfully');
         } else {
-            showError(`Space update error: ${data.error}`);
+            throw new Error(data.error || 'An error occurred while updating spaces.');
         }
     } catch (error) {
         console.error('Error:', error);
-        showError(`An error occurred while updating spaces: ${error.message}`);
+        throw error;
     }
 }
 
@@ -1075,7 +1132,9 @@ async function calculateEscapeRoutes() {
             });
 
             if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+                const errorData = await response.json();
+                throw new Error(`HTTP error! status: ${response.status}, message: ${errorData.error || 'Unknown error'}`);
+
             }
 
             const data = await response.json();
@@ -1104,8 +1163,9 @@ async function calculateEscapeRoutes() {
             renderGrid(bufferedGridData.grids[currentFloor]);
 
         } catch (error) {
-            console.error('Error:', error);
+            console.error('Error calculating escape route for space:', space.name, error);
             //showError(`An error occurred while calculating escape route for space ${space.name}: ${error.message}`);
+
         }
     }
 
@@ -1169,8 +1229,7 @@ function updateBufferForPaintedCells() {
 async function applyWallBuffer() {
     if (!Array.isArray(originalGridData.grids) || !originalGridData.grids.every(Array.isArray)) {
         console.error('Invalid grid data structure', originalGridData.grids);
-        showError('Invalid grid data structure. Please refresh the page and try again.');
-        return;
+        throw new Error('Invalid grid data structure. Please refresh the page and try again.');
     }
 
     try {
@@ -1193,15 +1252,14 @@ async function applyWallBuffer() {
                 bufferedGridData = {...originalGridData, grids: data.buffered_grids};
                 renderGrid(bufferedGridData.grids[currentFloor]);
             } else {
-                console.error('Received invalid grid data from server', data.buffered_grids);
-                showError('Received invalid data from server. Please try again.');
+                throw new Error('Received invalid grid data from server');
             }
         } else {
             throw new Error(data.error || 'An error occurred while applying the wall buffer.');
         }
     } catch (error) {
         console.error('Error:', error);
-        showError('An error occurred while applying the wall buffer.');
+        throw error;
     }
 }
 
