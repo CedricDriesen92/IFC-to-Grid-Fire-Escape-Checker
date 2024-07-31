@@ -13,6 +13,8 @@ let zoomLevel = 50000;
 let brushSize = 1;
 let lastPaintedCell = null;
 let lastPreviewCell = null;
+let isDrawingLine = false;
+let lineStart = null;
 let previewCells = new Set();
 let isMouseDown = false;
 let wallBuffer = 4;
@@ -125,12 +127,18 @@ spaceDetectionButton.addEventListener('click', () => {
 });
 
 document.getElementById('paint-tool').addEventListener('click', () => setCurrentTool('paint'));
+document.getElementById('line-tool').addEventListener('click', () => setCurrentTool('line'));
 document.getElementById('fill-tool').addEventListener('click', () => setCurrentTool('fill'));
 document.getElementById('draw-wall').addEventListener('click', () => setCurrentType('wall', 'paint'));
 document.getElementById('draw-door').addEventListener('click', () => setCurrentType('door', 'paint'));
 document.getElementById('draw-stair').addEventListener('click', () => setCurrentType('stair', 'paint'));
 document.getElementById('draw-floor').addEventListener('click', () => setCurrentType('floor', 'paint'));
 document.getElementById('draw-empty').addEventListener('click', () => setCurrentType('empty', 'paint'));
+document.getElementById('line-wall').addEventListener('click', () => setCurrentType('wall', 'line'));
+document.getElementById('line-door').addEventListener('click', () => setCurrentType('door', 'line'));
+document.getElementById('line-stair').addEventListener('click', () => setCurrentType('stair', 'line'));
+document.getElementById('line-floor').addEventListener('click', () => setCurrentType('floor', 'line'));
+document.getElementById('line-empty').addEventListener('click', () => setCurrentType('empty', 'line'));
 document.getElementById('fill-wall').addEventListener('click', () => setCurrentType('wall', 'fill'));
 document.getElementById('fill-door').addEventListener('click', () => setCurrentType('door', 'fill'));
 document.getElementById('fill-stair').addEventListener('click', () => setCurrentType('stair', 'fill'));
@@ -151,11 +159,13 @@ document.getElementById('export-grid').addEventListener('click', exportGrid);
 
 function initializeToolMenus() {
     const paintTool = document.getElementById('paint-tool');
+    const lineTool = document.getElementById('line-tool');
     const fillTool = document.getElementById('fill-tool');
     const paintMenu = document.getElementById('paint-menu');
+    const lineMenu = document.getElementById('line-menu');
     const fillMenu = document.getElementById('fill-menu');
 
-    if (!paintTool || !fillTool || !paintMenu || !fillMenu) {
+    if (!paintTool || !lineTool || !fillTool || !paintMenu || !lineMenu || !fillMenu) {
         console.error('One or more tool elements not found');
         return;
     }
@@ -177,6 +187,16 @@ function initializeToolMenus() {
         }, 100);
     });
     paintMenu.addEventListener('mouseleave', () => hideMenu(paintMenu));
+
+    lineTool.addEventListener('mouseenter', () => showMenu(lineMenu));
+    lineTool.addEventListener('mouseleave', () => {
+        setTimeout(() => {
+            if (!lineMenu.matches(':hover')) {
+                hideMenu(lineMenu);
+            }
+        }, 100);
+    });
+    lineMenu.addEventListener('mouseleave', () => hideMenu(lineMenu));
 
     fillTool.addEventListener('mouseenter', () => showMenu(fillMenu));
     fillTool.addEventListener('mouseleave', () => {
@@ -646,7 +666,10 @@ function handleMouseDown(e) {
         }
         e.preventDefault();
     } else if (e.button === 0) { // Left mouse button
-        if (currentType === 'start') {
+        if (currentTool === 'line') {
+            isDrawingLine = true;
+            lineStart = { row, col };
+        } else if (currentType === 'start') {
             start = { floor: currentFloor, row, col };
             renderGrid(bufferedGridData.grids[currentFloor]);
         } else if (currentType === 'goal') {
@@ -669,7 +692,10 @@ function handleMouseMove(e) {
         lastMouseY = e.clientY;
     } else {
         const { row, col } = getCellCoordinates(e);
-        if (isMouseDown) {
+        if (currentTool === 'line' && isDrawingLine) {
+            renderGrid(bufferedGridData.grids[currentFloor]);
+            previewLine(lineStart.row, lineStart.col, row, col);
+        } else if (isMouseDown) {
             paint(row, col);
         } else {
             showPreview(row, col);
@@ -681,7 +707,14 @@ function handleMouseUp(e) {
     if (e.button === 2) {
         isDragging = false;
     } else if (e.button === 0) {
-        stopPainting();
+        if (currentTool === 'line' && isDrawingLine) {
+            const { row, col } = getCellCoordinates(e);
+            drawLine(lineStart.row, lineStart.col, row, col);
+            isDrawingLine = false;
+            lineStart = null;
+        } else {
+            stopPainting();
+        }
     }
 }
 
@@ -855,6 +888,13 @@ function paintWithBrush(centerRow, centerCol) {
     return updates;
 }
 
+function drawLine(startRow, startCol, endRow, endCol) {
+    const updates = interpolatePaint(startRow, startCol, endRow, endCol);
+    batchUpdateCells(updates).then(() => {
+        renderGrid(bufferedGridData.grids[currentFloor]);
+    });
+}
+
 function interpolatePaint(startRow, startCol, endRow, endCol) {
     const updates = [];
     const dx = Math.abs(endCol - startCol);
@@ -917,6 +957,10 @@ function showPreview(row, col) {
         previewInterpolation(lastPreviewCell.row, lastPreviewCell.col, row, col);
     }
     lastPreviewCell = { row, col };
+}
+
+function previewLine(startRow, startCol, endRow, endCol) {
+    previewInterpolation(startRow, startCol, endRow, endCol);
 }
 
 function previewBrush(centerRow, centerCol) {
