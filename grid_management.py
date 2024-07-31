@@ -259,13 +259,16 @@ class GridManager:
         while True:
             for _ in range(4):  # Check all 4 directions
                 next_dir = (current_dir - 1) % 4  # Turn left
+                prev_dir = (current_dir + 1) % 4
                 dx, dy = directions[next_dir]
+                dxf, dyf = directions[next_dir]
                 next_point = (current[0] + dx, current[1] + dy)
+                next_point_furthest = (current[0], current[1])
                 
                 if next_point in points_set:
                     if next_point == start_point and len(border) > 2:
                         return border  # We've completed the loop
-                    border.append(next_point)
+                    border.append(next_point_furthest)
                     current = next_point
                     current_dir = next_dir
                     break

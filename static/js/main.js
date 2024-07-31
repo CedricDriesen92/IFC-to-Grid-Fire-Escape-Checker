@@ -9,7 +9,7 @@ let goals = [];
 let cellSize = 20;
 let isPainting = false;
 let minZoom = 1;
-let zoomLevel = 10000;
+let zoomLevel = 50000;
 let brushSize = 1;
 let lastPaintedCell = null;
 let lastPreviewCell = null;
@@ -37,6 +37,7 @@ let transform = new DOMMatrix();
 let inverseTransform = new DOMMatrix();
 let showBuffer = false;
 let showSpaces = true;
+let cellBufferScale = 100;
 
 const MAX_TRAVEL_DISTANCES = {
     daytime: {
@@ -310,8 +311,8 @@ function initializeGrid() {
     minZoom = Math.min(horizontalZoom, verticalZoom);
     console.log('Calculated zoom levels:', horizontalZoom, verticalZoom, minZoom);
 
-    zoomLevel = 20*Math.max(100, Math.min(25000, Math.round(minZoom * 100)));
-    cellSize = (zoomLevel / 100) * bufferedGridData.grid_size;
+    zoomLevel = 10*Math.max(100, Math.min(25000, Math.round(minZoom * 100)));
+    cellSize = (zoomLevel / cellBufferScale) * bufferedGridData.grid_size;
     console.log('Set zoom level and cell size:', zoomLevel, cellSize);
 
     zoomSlider.value = zoomLevel;
@@ -321,6 +322,29 @@ function initializeGrid() {
     renderGrid(bufferedGridData.grids[currentFloor]);
     updateFloorDisplay();
     applyWallBuffer();
+}
+
+function drawGridBorders(width, height, cellSize, ctx) {
+    ctx.beginPath();
+    
+    // Vertical lines
+    for (let x = 0; x <= width; x += cellSize) {
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+    }
+
+    // Horizontal lines
+    for (let y = 0; y <= height; y += cellSize) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+    }
+
+    // Outer border
+    ctx.rect(0, 0, width, height);
+
+    ctx.strokeStyle = "grey";
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
 }
 
 function renderGrid(grid) {
@@ -341,6 +365,8 @@ function renderGrid(grid) {
             ctx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
         });
     });
+
+    drawGridBorders(canvas.width, canvas.height, cellSize, ctx);
 
     // Render spaces
     if(showSpaces){
@@ -474,7 +500,7 @@ function renderSpaces(ctx) {
             }
         }
 
-        ctx.strokeStyle = hasViolations ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 0, 0, 0.8)';
+        ctx.strokeStyle = hasViolations ? 'rgba(255, 0, 0, 0.1)' : 'rgba(0, 0, 0, 0.1)';
         ctx.lineWidth = hasViolations ? 3 : 2;
         ctx.fillStyle = spaceColors[space.id];
         if (!space.polygon || space.polygon.length === 0) {
@@ -497,31 +523,39 @@ function renderSpaces(ctx) {
         ctx.stroke();
 
         // Render space name and path lengths
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-        ctx.font = '12px Arial';
+        ctx.fillStyle = 'rgba(255, 255, 255, 1)';
+        ctx.strokeStyle = 'rgba(0, 0, 0, 1)';
+        ctx.lineWidth = 3;
+        ctx.lineJoin="miter";
+        ctx.font = 'bold 24px Arial';
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         const centerX = space.polygon.reduce((sum, p) => sum + p[0], 0) / space.polygon.length;
         const centerY = space.polygon.reduce((sum, p) => sum + p[1], 0) / space.polygon.length;
         const textX = ((centerX - bufferedGridData.bbox.min_x) / bufferedGridData.grid_size + 0.5) * cellSize;
         const textY = ((centerY - bufferedGridData.bbox.min_y) / bufferedGridData.grid_size + 0.5) * cellSize;
-        
+        ctx.strokeText(space.name, textX, textY);
         ctx.fillText(space.name, textX, textY);
+        ctx.font = '18px Arial';
         
         if (foundEscapeRoutes) {
             //foundEscapeRoutes.forEach(r=>console.log(r.space_name, " ", space.name));
             const route = foundEscapeRoutes.find(r => r.space_name === space.name);
             if (route && route.distance) {
+                ctx.strokeText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
                 ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
                 if(route.distance_to_stair >= 0){
+                    ctx.strokeText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
                     ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
                 }
             }
             else if(route){
-                ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+                //ctx.fillStyle = 'rgba(0, 0, 0, 1)';
+                ctx.strokeText('NO ESCAPE ROUTE FOUND!', textX, textY + 15);
                 ctx.fillText('NO ESCAPE ROUTE FOUND!', textX, textY + 15);
             }    
             else{
+                ctx.strokeText('Waiting for result...', textX, textY + 15);
                 ctx.fillText('Waiting for result...', textX, textY + 15);
             }
         }
@@ -1218,7 +1252,7 @@ function handleMaxStairDistanceChange(e) {
 
 function generateRandomColor() {
     const hue = Math.floor(Math.random() * 360);
-    return `hsla(${hue}, 70%, 80%, 30%)`;
+    return `hsla(${hue}, 70%, 70%, 50%)`;
 }
 
 function updateBufferForPaintedCells() {
@@ -1369,7 +1403,7 @@ function handleZoomChange(e) {
                          .scale(zoomFactor)
                          .translate(-center.x, -center.y);
 
-    cellSize = (zoomLevel / 100) * bufferedGridData.grid_size;
+    cellSize = (zoomLevel / cellBufferScale) * bufferedGridData.grid_size;
     renderGrid(bufferedGridData.grids[currentFloor]);
     updateZoomLevel();
 }
