@@ -1,3 +1,4 @@
+import math
 import networkx as nx
 import numpy as np
 from typing import List, Tuple, Dict, Any
@@ -17,8 +18,13 @@ class Pathfinder:
         self.bbox = bbox
         self.allow_diagonal = allow_diagonal
         self.minimize_cost = minimize_cost
-        self.graph = self._create_graph()
+        self.graph = None
 
+    def create_graph(self):
+        if self.graph is None:
+            self.graph = self._create_graph()
+        return self.graph
+    
     def _create_graph(self) -> nx.Graph:
         G = nx.Graph()
         
@@ -63,21 +69,124 @@ class Pathfinder:
         return weight * (2**0.5 if is_diagonal else 1.0)
 
     def _connect_stairs(self, G: nx.Graph):
-        stair_positions = defaultdict(list)
+        stair_angle = math.radians(40)  # 40 degree angle for stairs
+        num_directions = 16  # Number of directions to check
+        stair_groups = self._group_connected_stairs()
+
+        for group in stair_groups:
+            floors = sorted(set(floor for _, _, floor in group))
+            for i in range(len(floors) - 1):
+                lower_floor, upper_floor = floors[i], floors[i + 1]
+                lower_stairs = [pos for pos in group if pos[2] == lower_floor]
+                upper_stairs = [pos for pos in group if pos[2] == upper_floor]
+
+                height_diff = self.floors[upper_floor]['elevation'] - self.floors[lower_floor]['elevation']
+                horizontal_distance = height_diff / math.tan(stair_angle)
+                grid_distance = int(round(horizontal_distance / self.grid_size))
+
+                connected = False
+                for start_x, start_y, _ in lower_stairs:
+                    for end_x, end_y, _ in upper_stairs:
+                        if self._check_stair_connection(start_x, start_y, lower_floor, end_x, end_y, upper_floor, grid_distance, num_directions):
+                            start_node = (start_x, start_y, lower_floor)
+                            end_node = (end_x, end_y, upper_floor)
+                            if start_node in G and end_node in G:
+                                weight = self._calculate_stair_weight(start_node, end_node, height_diff)
+                                G.add_edge(start_node, end_node, weight=weight)
+                                connected = True
+                                break
+                    if connected:
+                        break
+
+                if not connected:
+                    # Fallback to old method if no suitable connection found
+                    self._connect_stairs_fallback(G, lower_stairs, upper_stairs)
+
+    def _group_connected_stairs(self):
+        stair_groups = []
+        visited = set()
+
         for floor, grid in enumerate(self.grids):
             for x, row in enumerate(grid):
                 for y, cell in enumerate(row):
-                    if cell == 'stair':
-                        stair_positions[(x, y)].append(floor)
+                    if cell == 'stair' and (x, y, floor) not in visited:
+                        group = self._dfs_stair_group(x, y, floor)
+                        stair_groups.append(group)
+                        visited.update(group)
+
+        return stair_groups
+
+    def _dfs_stair_group(self, x, y, floor):
+        stack = [(x, y, floor)]
+        group = set()
+
+        while stack:
+            cx, cy, cf = stack.pop()
+            if (cx, cy, cf) in group:
+                continue
+
+            group.add((cx, cy, cf))
+
+            # Check neighbors on the same floor
+            for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                nx, ny = cx + dx, cy + dy
+                if (0 <= nx < len(self.grids[cf]) and 
+                    0 <= ny < len(self.grids[cf][0]) and 
+                    self.grids[cf][nx][ny] == 'stair'):
+                    stack.append((nx, ny, cf))
+
+            # Check corresponding positions on adjacent floors
+            for adj_floor in [cf - 1, cf + 1]:
+                if 0 <= adj_floor < len(self.grids) and self.grids[adj_floor][cx][cy] == 'stair':
+                    stack.append((cx, cy, adj_floor))
+
+        return group
+
+    def _check_stair_connection(self, start_x, start_y, start_floor, end_x, end_y, end_floor, grid_distance, num_directions):
+        angle_step = 2 * math.pi / num_directions
+        for i in range(num_directions):
+            angle = i * angle_step
+            dx = int(round(grid_distance * math.cos(angle)))
+            dy = int(round(grid_distance * math.sin(angle)))
+            
+            if start_x + dx == end_x and start_y + dy == end_y:
+                return self._check_path(start_x, start_y, start_floor, end_x, end_y, end_floor)
         
-        for pos, floors in stair_positions.items():
-            if len(floors) > 1:
-                for i in range(len(floors)):
-                    for j in range(i + 1, len(floors)):
-                        node1 = (pos[0], pos[1], floors[i])
-                        node2 = (pos[0], pos[1], floors[j])
-                        if node1 in G and node2 in G:
-                            G.add_edge(node1, node2, weight=self._get_edge_weight('stair'))
+        return False
+
+    def _check_path(self, start_x, start_y, start_floor, end_x, end_y, end_floor):
+        dx = end_x - start_x
+        dy = end_y - start_y
+        steps = max(abs(dx), abs(dy))
+        
+        if steps == 0:
+            return True
+
+        x_step = dx / steps
+        y_step = dy / steps
+
+        for i in range(1, steps):
+            x = int(start_x + i * x_step)
+            y = int(start_y + i * y_step)
+            floor = start_floor + (end_floor - start_floor) * i // steps
+
+            if self.grids[floor][x][y] in ['wall', 'walla']:
+                return False
+
+        return True
+
+    def _calculate_stair_weight(self, start_node, end_node, height_diff):
+        horizontal_distance = math.sqrt((end_node[0] - start_node[0])**2 + (end_node[1] - start_node[1])**2) * self.grid_size
+        actual_distance = math.sqrt(height_diff**2 + horizontal_distance**2)
+        return self._get_edge_weight('stair') * actual_distance / self.grid_size
+
+    def _connect_stairs_fallback(self, G, lower_stairs, upper_stairs):
+        for lower_x, lower_y, lower_floor in lower_stairs:
+            for upper_x, upper_y, upper_floor in upper_stairs:
+                node1 = (lower_x, lower_y, lower_floor)
+                node2 = (upper_x, upper_y, upper_floor)
+                if node1 in G and node2 in G:
+                    G.add_edge(node1, node2, weight=self._get_edge_weight('stair'))
         
     def _calculate_path_lengths(self, path: List[Tuple[int, int, int]]) -> Dict[str, float]:
         total_length = 0
@@ -331,12 +440,34 @@ def calculate_escape_route(grids: List[List[List[str]]], grid_size: float, floor
         logger.debug(f"Exits: {exits}, Allow diagonal: {allow_diagonal}")
         
         pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal)
+        pathfinder.create_graph()
         result = pathfinder.calculate_escape_route(space, exits)
         
         logger.debug(f"Escape route calculation result: {result}")
         return result
     except Exception as e:
         logger.error(f"Error in calculate_escape_route: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
+    
+def calculate_escape_routes(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], 
+                                              bbox: Dict[str, float], spaces: List[Dict[str, Any]], exits: List[Tuple[int, int, int]], 
+                                              allow_diagonal: bool = False) -> List[Dict[str, Any]]:
+    try: 
+        # Create a single Pathfinder instance
+        pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal)
+        pathfinder.create_graph()  # Create the graph once
+        
+        results = []
+        for space in spaces:
+            result = pathfinder.calculate_escape_route(space, exits)
+            violations = check_escape_route_rules(result, grid_size)
+            result['violations'] = violations
+            results.append(result)
+        
+        return results
+    except Exception as e:
+        logger.error(f"Error in update_spaces_and_calculate_escape_routes: {str(e)}")
         logger.error(traceback.format_exc())
         raise
 

@@ -4,10 +4,11 @@ import os
 from typing import List, Dict, Tuple, Any
 from ifc_processing import process_ifc_file
 from grid_management import GridManager, validate_grid_data
-from pathfinding import find_path, detect_exits, calculate_escape_route, check_escape_route_rules
+from pathfinding import Pathfinder, find_path, detect_exits, calculate_escape_route, calculate_escape_routes, check_escape_route_rules
 import json
 import webbrowser
 from threading import Timer
+import uuid
 
 
 import logging
@@ -16,6 +17,11 @@ import sys, traceback
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+# Last created graph
+graphs = None
+
+hasGridChanged = True
 
 if getattr(sys, 'frozen', False):
     template_folder = os.path.join(sys._MEIPASS, 'templates')
@@ -72,10 +78,12 @@ def validate_json_data(data):
 
 @app.route('/api/edit-grid', methods=['POST'])
 def edit_grid() -> tuple[Dict[str, Any], int]:
+    global hasGridChanged
     data = request.json
     try:
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
         updated_grids = grid_manager.edit_grid(data['edits'])
+        hasGridChanged = True
         return jsonify({'grids': updated_grids}), 200
     except Exception as e:
         app.logger.error(f"Error editing grid: {str(e)}")
@@ -105,6 +113,8 @@ def find_path_route() -> tuple[Dict[str, Any], int]:
 
 @app.route('/api/apply-wall-buffer', methods=['POST'])
 def apply_wall_buffer() -> Tuple[Dict[str, Any], int]:
+    global hasGridChanged
+    hasGridChanged = True
     data = request.json
     try:
         validate_grid_data(data['grids'], data['grid_size'], data['floors'], data['bbox'])
@@ -123,6 +133,8 @@ def apply_wall_buffer() -> Tuple[Dict[str, Any], int]:
 
 @app.route('/api/update-cell', methods=['POST'])
 def update_cell() -> Tuple[Dict[str, Any], int]:
+    global hasGridChanged
+    hasGridChanged = True
     data = request.json
     try:
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
@@ -141,6 +153,8 @@ def update_cell() -> Tuple[Dict[str, Any], int]:
 
 @app.route('/api/batch-update-cells', methods=['POST'])
 def batch_update_cells():
+    global hasGridChanged
+    hasGridChanged = True
     data = request.json
     try:
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
@@ -183,44 +197,48 @@ def detect_spaces_route() -> tuple[Dict[str, Any], int]:
         logger.error(f"Error detecting spaces: {str(e)}", exc_info=True)
         return jsonify({'error': f'An error occurred while detecting spaces: {str(e)}'}), 500
     
+@app.route('/api/create-graph', methods=['POST'])
+def api_create_graph():
+    global graphs
+    global hasGridChanged
+    data = request.json
+    try:
+        validate_grid_data(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        
+        pathfinder = Pathfinder(data['grids'], data['grid_size'], data['floors'], data['bbox'], data.get('allow_diagonal', False))
+        if hasGridChanged or not graph:
+            graph = pathfinder.create_graph()
+            hasGridChanged = False
+        
+        graphs = (graph, pathfinder)
+        
+        return jsonify({'status': 'success'})
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Invalid input data: {str(e)}'}), 400
+    except Exception as e:
+        logger.error(f"Error creating graph: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/calculate-escape-route', methods=['POST'])
 def api_calculate_escape_route():
     data = request.json
-    logger.debug(f"Received data for escape route calculation: {data}")
     try:
-        validate_grid_data(data['grids'], data['grid_size'], data['floors'], data['bbox'])
-        grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        graph, pathfinder = graphs
         
-        # Ensure space data is valid
-        if not data['space'] or 'id' not in data['space']:
-            raise ValueError("Invalid space data")
+        space = data['space']
+        exits = data['exits']
         
-        # Ensure exits data is valid
-        if not data['exits'] or not all(len(exit) == 3 for exit in data['exits']):
-            raise ValueError("Invalid exits data")
-
-        escape_route = calculate_escape_route(
-            data['grids'],
-            data['grid_size'],
-            data['floors'],
-            data['bbox'],
-            data['space'],
-            data['exits'],
-            data['allow_diagonal']
-        )
+        result = pathfinder.calculate_escape_route(space, exits)
+        violations = check_escape_route_rules(result, pathfinder.grid_size)
+        result['violations'] = violations
         
-        # Add rule checking here
-        violations = check_escape_route_rules(escape_route, data['grid_size'])
-        escape_route['violations'] = violations
-
-        logger.debug(f"Calculated escape route for space {data['space']['id']}")
-        return jsonify({'escape_route': escape_route})
+        return jsonify({'escape_route': result})
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}", exc_info=True)
         return jsonify({'error': f'Invalid input data: {str(e)}'}), 400
     except Exception as e:
         logger.error(f"Error calculating escape route: {str(e)}", exc_info=True)
-        logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 @app.route('/static/<path:path>')

@@ -1174,10 +1174,11 @@ function highlightPath(path) {
 }
 
 async function calculateEscapeRoutes() {
-    if (!spacesData || spacesData.length === 0 || !goals || goals.length === 0) {
-        showError('Please generate spaces and set exits before calculating escape routes.');
+    if (!goals || goals.length === 0) {
+        showError('Please set exits before calculating escape routes.');
         return;
     }
+    await updateSpaces();
 
     foundEscapeRoutes = [];
     let spacesWithViolations = [];
@@ -1188,63 +1189,80 @@ async function calculateEscapeRoutes() {
 
     showProgress('Calculating escape routes...');
 
-    for (let i = 0; i < spacesData.length; i++) {
-        const space = spacesData[i];
-        updateProgress((i / spacesData.length) * 100, `Calculating route for space ${i + 1} of ${spacesData.length}`);
+    // First, create the graph on the server
+    try {
+        const createGraphResponse = await fetch('/api/create-graph', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                grids: bufferedGridData.grids,
+                grid_size: bufferedGridData.grid_size,
+                floors: bufferedGridData.floors,
+                bbox: bufferedGridData.bbox,
+                allow_diagonal: allowDiagonal
+            })
+        });
 
-        try {
-            const response = await fetch('/api/calculate-escape-route', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    grids: bufferedGridData.grids,
-                    grid_size: bufferedGridData.grid_size,
-                    floors: bufferedGridData.floors,
-                    bbox: bufferedGridData.bbox,
-                    space: space,
-                    exits: goals.map(goal => [goal.row, goal.col, goal.floor]),
-                    allow_diagonal: allowDiagonal
-                })
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(`HTTP error! status: ${response.status}, message: ${errorData.error || 'Unknown error'}`);
-
-            }
-
-            const data = await response.json();
-            foundEscapeRoutes.push(data.escape_route);
-
-            // Check rules
-            violations = data.escape_route.violations;
-            //console.log(violations)
-            if (violations['daytime'].length > 0 || violations['nighttime'].length > 0) {
-                spacesWithViolations.push({space: space.name, violations});
-            }
-
-            // Update statistics
-            if (data.escape_route.distance) {
-                totalLength = data.escape_route.distance;
-                stairwayDistance = data.escape_route.distance_to_stair;
-                if (data.escape_route.distance_to_stair > maxStairDistance || data.escape_route.distance > maxStairDistance) {
-                    spacesOverMaxDistance.push(data.escape_route.space_name);
-                }
-            } else {
-                spacesWithoutExits.push(data.escape_route.space_name);
-            }
-
-            // Render the current progress
-            displayViolations(spacesWithViolations);
-            renderGrid(bufferedGridData.grids[currentFloor]);
-
-        } catch (error) {
-            console.error('Error calculating escape route for space:', space.name, error);
-            //showError(`An error occurred while calculating escape route for space ${space.name}: ${error.message}`);
-
+        if (!createGraphResponse.ok) {
+            const errorData = await createGraphResponse.json();
+            throw new Error(`HTTP error! status: ${createGraphResponse.status}, message: ${errorData.error || 'Unknown error'}`);
         }
+
+        for (let i = 0; i < spacesData.length; i++) {
+            const space = spacesData[i];
+            updateProgress((i / spacesData.length) * 100, `Calculating route for space ${i + 1} of ${spacesData.length}`);
+
+            try {
+                const response = await fetch('/api/calculate-escape-route', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        space: space,
+                        exits: goals.map(goal => [goal.row, goal.col, goal.floor])
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(`HTTP error! status: ${response.status}, message: ${errorData.error || 'Unknown error'}`);
+                }
+
+                const data = await response.json();
+                foundEscapeRoutes.push(data.escape_route);
+
+                // Check rules
+                const violations = data.escape_route.violations;
+                if (violations['daytime'].length > 0 || violations['nighttime'].length > 0) {
+                    spacesWithViolations.push({space: space.name, violations});
+                }
+
+                // Update statistics
+                if (data.escape_route.distance) {
+                    totalLength = Math.max(totalLength, data.escape_route.distance);
+                    stairwayDistance = Math.max(stairwayDistance, data.escape_route.distance_to_stair);
+                    if (data.escape_route.distance_to_stair > maxStairDistance || data.escape_route.distance > maxStairDistance) {
+                        spacesOverMaxDistance.push(data.escape_route.space_name);
+                    }
+                } else {
+                    spacesWithoutExits.push(data.escape_route.space_name);
+                }
+
+                // Render the current progress
+                displayViolations(spacesWithViolations);
+                renderGrid(bufferedGridData.grids[currentFloor]);
+
+            } catch (error) {
+                console.error('Error calculating escape route for space:', space.name, error);
+            }
+        }
+
+    } catch (error) {
+        console.error('Error creating graph:', error);
+        showError(`An error occurred while creating the graph: ${error.message}`);
     }
 
     hideProgress();
