@@ -404,7 +404,7 @@ function renderGrid(grid) {
     // Render spaces
     if(showSpaces){
         renderSpaces(ctx);
-        renderStairConnections(ctx);
+        //renderStairConnections(ctx);
     }
 
 
@@ -426,6 +426,7 @@ function renderGrid(grid) {
         let spacesOverMaxDistance = [];
         let spacesWithoutExits = [];
         foundEscapeRoutes.forEach(route => {
+            let prevPoint = null;
             console.log(route);
             console.log(route['distance']);
             console.log(route.distance);
@@ -461,8 +462,58 @@ function renderGrid(grid) {
                             ctx.lineTo(x, y);
                         }
                     }
+                    prevPoint = point;
                 });
                 ctx.stroke();
+
+                route.optimal_path.forEach((point, index) => {
+                    if (point[2] === currentFloor) {
+                        const x = (point[1] + 0.5) * cellSize;
+                        const y = (point[0] + 0.5) * cellSize;
+                        const prevPoint = index > 0 ? route.optimal_path[index - 1] : null;
+                        const nextPoint = index < route.optimal_path.length - 1 ? route.optimal_path[index + 1] : null;
+                
+                        if (prevPoint && prevPoint[2] !== currentFloor) {
+                            const prevx = (prevPoint[1] + 0.5) * cellSize;
+                            const prevy = (prevPoint[0] + 0.5) * cellSize;
+                            const angle = Math.atan2(y - prevy, x - prevx) + Math.PI;
+                            
+                            ctx.fillStyle = 'rgba(0, 0, 255, 1)'; // Coming down (blue)
+                            ctx.beginPath();
+                            ctx.moveTo(prevx-cellSize/2, prevy);
+                            ctx.lineTo(prevx+cellSize/2, prevy);
+                            ctx.lineTo(prevx, prevy-cellSize);
+                            ctx.closePath;
+                            ctx.fill();
+                            ctx.setLineDash([1,5]);
+                            //ctx.strokeStyle = ctx.fillStyle;
+                            ctx.lineWidth = 2;
+                            ctx.moveTo(x, y);
+                            ctx.lineTo(prevx, prevy);
+                            ctx.stroke();
+                        }
+                
+                        if (nextPoint && nextPoint[2] !== currentFloor) {
+                            const nextx = (nextPoint[1] + 0.5) * cellSize;
+                            const nexty = (nextPoint[0] + 0.5) * cellSize;
+                            const angle = Math.atan2(nexty - y, nextx - x);
+                            
+                            ctx.fillStyle = 'rgba(255, 0, 255, 1)'; // Going up (pink)
+                            ctx.beginPath();
+                            ctx.moveTo(nextx-cellSize/2, nexty);
+                            ctx.lineTo(nextx+cellSize/2, nexty);
+                            ctx.lineTo(nextx, nexty+cellSize);
+                            ctx.closePath;
+                            ctx.fill();
+                            ctx.setLineDash([1,5]);
+                            //ctx.strokeStyle = ctx.fillStyle;
+                            ctx.lineWidth = 2;
+                            ctx.moveTo(x, y);
+                            ctx.lineTo(nextx, nexty);
+                            ctx.stroke();
+                        }
+                    }
+                });
 
                 // Mark the furthest point
                 const furthestPoint = route.furthest_point;
@@ -471,7 +522,7 @@ function renderGrid(grid) {
                     const x = (furthestPoint[1] + 0.5) * cellSize;
                     const y = (furthestPoint[0] + 0.5) * cellSize;
                     ctx.beginPath();
-                    ctx.arc(x, y, cellSize * 2, 0, 2 * Math.PI);
+                    ctx.arc(x, y, cellSize * 1.5, 0, 2 * Math.PI);
                     ctx.fill();
                 }
             }
@@ -492,7 +543,7 @@ function renderGrid(grid) {
     if (start && start.floor === currentFloor) {
         ctx.fillStyle = 'green';
         ctx.beginPath();
-        ctx.arc((start.col + 0.5) * cellSize, (start.row + 0.5) * cellSize, cellSize * 2, 0, 2 * Math.PI);
+        ctx.arc((start.col + 0.5) * cellSize, (start.row + 0.5) * cellSize, cellSize * 1.5, 0, 2 * Math.PI);
         ctx.fill();
     }
 
@@ -502,7 +553,7 @@ function renderGrid(grid) {
         goals.forEach(goal => {
             if (goal.floor === currentFloor) {
                 ctx.beginPath();
-                ctx.arc((goal.col + 0.5) * cellSize, (goal.row + 0.5) * cellSize, cellSize * 2, 0, 2 * Math.PI);
+                ctx.arc((goal.col + 0.5) * cellSize, (goal.row + 0.5) * cellSize, cellSize * 1.5, 0, 2 * Math.PI);
                 ctx.fill();
             }
         });

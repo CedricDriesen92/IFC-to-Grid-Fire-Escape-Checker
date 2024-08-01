@@ -328,9 +328,9 @@ class Pathfinder:
     
     def calculate_escape_route(self, space: Dict[str, Any], exits: List[Tuple[int, int, int]]) -> Dict[str, Any]:
         try:
-            logger.debug(f"Calculating escape route for space: {space['name']}")
+            #logger.debug(f"Calculating escape route for space: {space['name']}")
             candidate_points = self._select_candidate_points(space)
-            logger.debug(f"Candidate points: {candidate_points}")
+            #logger.debug(f"Candidate points: {candidate_points}")
             
             max_distance = 0
             furthest_point = None
@@ -340,7 +340,7 @@ class Pathfinder:
 
             for point in candidate_points:
                 if point not in self.graph:
-                    logger.warning(f"Point {point} not in graph for space {space['name']}")
+                    #logger.warning(f"Point {point} not in graph for space {space['name']}")
                     continue
 
                 min_exit_distance = float('inf')
@@ -351,7 +351,7 @@ class Pathfinder:
                 for exit in exits:
                     exit = (exit[0], exit[1], exit[2])
                     if exit not in self.graph:
-                        logger.warning(f"Exit {exit} not in graph")
+                        #logger.warning(f"Exit {exit} not in graph")
                         continue
 
                     try:
@@ -368,7 +368,7 @@ class Pathfinder:
                             best_exit = exit
                             best_path = path
                     except nx.NetworkXNoPath:
-                        logger.warning(f"No path found from {point} to exit {exit}")
+                        #logger.warning(f"No path found from {point} to exit {exit}")
                         continue
 
                 if min_exit_distance > max_distance:
@@ -397,7 +397,7 @@ class Pathfinder:
                     'space_name': space['name']
                 }
 
-            logger.debug(f"Escape route calculation result for space {space['name']}: {result}")
+            #logger.debug(f"Escape route calculation result for space {space['name']}: {result}")
             return result
         except Exception as e:
             logger.error(f"Error in calculate_escape_route for space {space['name']}: {str(e)}")
