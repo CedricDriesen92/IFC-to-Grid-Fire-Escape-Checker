@@ -314,14 +314,6 @@ function handleProcessedData(data) {
     console.log('Grid data seems valid, initializing grid...');
     initializeGrid();
     initializeToolMenus();
-
-    // Apply wall buffer after initialization
-    applyWallBuffer().then(() => {
-        console.log('Initial wall buffer applied');
-    }).catch(error => {
-        console.error('Error applying initial wall buffer:', error);
-        showError('An error occurred while applying the initial wall buffer. Please try again.');
-    });
 }
 
 async function initializeGrid() {
@@ -353,6 +345,12 @@ async function initializeGrid() {
     document.getElementById('hidden1').hidden = false;
     document.getElementById('hidden2').hidden = false;
     updateZoomLevel();
+    await applyWallBuffer().then(() => {
+        console.log('Initial wall buffer applied');
+    }).catch(error => {
+        console.error('Error applying initial wall buffer:', error);
+        showError('An error occurred while applying the initial wall buffer. Please try again.');
+    });
     await createOrFetchGraph();
     await getStairConnections();
     renderGrid(bufferedGridData.grids[currentFloor]);

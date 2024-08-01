@@ -14,6 +14,7 @@ class Pathfinder:
     def __init__(self, original_grids: List[List[List[str]]], buffered_grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = True):
         self.original_grids = original_grids
         self.buffered_grids = buffered_grids
+        print(buffered_grids)
         self.grids = buffered_grids
         self.grid_size = grid_size
         self.floors = floors
