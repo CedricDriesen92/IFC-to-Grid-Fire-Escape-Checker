@@ -14,7 +14,6 @@ class Pathfinder:
     def __init__(self, original_grids: List[List[List[str]]], buffered_grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = True):
         self.original_grids = original_grids
         self.buffered_grids = buffered_grids
-        print(buffered_grids)
         self.grids = buffered_grids
         self.grid_size = grid_size
         self.floors = floors
@@ -71,23 +70,79 @@ class Pathfinder:
         
         return weight * (2**0.5 if is_diagonal else 1.0)
 
+    def _group_connected_stairs(self):
+        stair_groups = []
+        visited = set()
+
+        for floor in range(len(self.grids)):
+            for x in range(len(self.grids[floor])):
+                for y in range(len(self.grids[floor][0])):
+                    if self.grids[floor][x][y] == 'stair' and (x, y, floor) not in visited:
+                        group = self._flood_fill_3d(x, y, floor)
+                        stair_groups.append(group)
+                        visited.update(group)
+
+        return stair_groups
+
+    def _flood_fill_3d(self, start_x, start_y, start_floor):
+        queue = [(start_x, start_y, start_floor)]
+        visited = set()
+
+        while queue:
+            x, y, floor = queue.pop(0)
+            if (x, y, floor) in visited:
+                continue
+
+            visited.add((x, y, floor))
+
+            # Check neighbors on the same floor
+            for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                nx, ny = x + dx, y + dy
+                if (0 <= nx < len(self.grids[floor]) and 
+                    0 <= ny < len(self.grids[floor][0]) and 
+                    self.grids[floor][nx][ny] == 'stair' and
+                    (nx, ny, floor) not in visited):
+                    queue.append((nx, ny, floor))
+
+            # Check directly above and below
+            for adj_floor in [floor - 1, floor + 1]:
+                if (0 <= adj_floor < len(self.grids) and 
+                    self.grids[adj_floor][x][y] == 'stair' and
+                    (x, y, adj_floor) not in visited):
+                    queue.append((x, y, adj_floor))
+
+        return visited
+
     def _connect_stairs(self, G: nx.Graph):
-        stair_angle = math.radians(40)  # 40 degree angle for stairs
+        stair_angle = math.radians(55)  # 55 degree angle for stairs
         num_directions = 16  # Number of directions to check
         stair_groups = self._group_connected_stairs()
 
-        for group in stair_groups:
+        #print(f"Found {len(stair_groups)} stair groups")
+
+        for group_index, group in enumerate(stair_groups):
+            #print(f"Processing stair group {group_index + 1}")
             floors = sorted(set(floor for _, _, floor in group))
+            #print(f"Group contains stairs on floors: {floors}")
+            
             for i in range(len(floors) - 1):
                 lower_floor, upper_floor = floors[i], floors[i + 1]
                 lower_stairs = [pos for pos in group if pos[2] == lower_floor]
                 upper_stairs = [pos for pos in group if pos[2] == upper_floor]
 
+                #print(f"Connecting floors {lower_floor} and {upper_floor}")
+                #print(f"Lower stairs: {lower_stairs}")
+                print(f"Upper stairs: {upper_stairs}")
+
                 height_diff = self.floors[upper_floor]['elevation'] - self.floors[lower_floor]['elevation']
                 horizontal_distance = height_diff / math.tan(stair_angle)
                 grid_distance = int(round(horizontal_distance / self.grid_size))
 
-                connected = False
+                #print(f"Height difference: {height_diff}")
+                print(f"Calculated horizontal distance: {horizontal_distance}")
+                #print(f"Grid distance: {grid_distance}")
+
+                connections_made = 0
                 for start_x, start_y, _ in lower_stairs:
                     for end_x, end_y, _ in upper_stairs:
                         if self._check_stair_connection(start_x, start_y, lower_floor, end_x, end_y, upper_floor, grid_distance, num_directions):
@@ -96,50 +151,16 @@ class Pathfinder:
                             if start_node in G and end_node in G:
                                 weight = self._calculate_stair_weight(start_node, end_node, height_diff)
                                 G.add_edge(start_node, end_node, weight=weight)
-                                connected = True
-                if not connected:
-                    # Fallback to old method if no suitable connection found
+                                connections_made += 1
+                                #print(f"Connected {start_node} to {end_node} with weight {weight}")
+                        #else:
+                        #    print(f"Failed to connect {(start_x, start_y, lower_floor)} to {(end_x, end_y, upper_floor)}")
+                
+                if connections_made == 0:
+                    print(f"No connections made between floors {lower_floor} and {upper_floor}, using fallback method")
                     self._connect_stairs_fallback(G, lower_stairs, upper_stairs)
-
-    def _group_connected_stairs(self):
-        stair_groups = []
-        visited = set()
-
-        for floor, grid in enumerate(self.grids):
-            for x, row in enumerate(grid):
-                for y, cell in enumerate(row):
-                    if cell == 'stair' and (x, y, floor) not in visited:
-                        group = self._dfs_stair_group(x, y, floor)
-                        stair_groups.append(group)
-                        visited.update(group)
-
-        return stair_groups
-
-    def _dfs_stair_group(self, x, y, floor):
-        stack = [(x, y, floor)]
-        group = set()
-
-        while stack:
-            cx, cy, cf = stack.pop()
-            if (cx, cy, cf) in group:
-                continue
-
-            group.add((cx, cy, cf))
-
-            # Check neighbors on the same floor
-            for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-                nx, ny = cx + dx, cy + dy
-                if (0 <= nx < len(self.grids[cf]) and 
-                    0 <= ny < len(self.grids[cf][0]) and 
-                    self.grids[cf][nx][ny] == 'stair'):
-                    stack.append((nx, ny, cf))
-
-            # Check corresponding positions on adjacent floors
-            for adj_floor in [cf - 1, cf + 1]:
-                if 0 <= adj_floor < len(self.grids) and self.grids[adj_floor][cx][cy] == 'stair':
-                    stack.append((cx, cy, adj_floor))
-
-        return group
+                else:
+                    print(f"Made {connections_made} connections between floors {lower_floor} and {upper_floor}")
 
     def _check_stair_connection(self, start_x, start_y, start_floor, end_x, end_y, end_floor, grid_distance, num_directions):
         angle_step = 2 * math.pi / num_directions
@@ -167,9 +188,8 @@ class Pathfinder:
         for i in range(1, steps):
             x = int(start_x + i * x_step)
             y = int(start_y + i * y_step)
-            floor = start_floor + (end_floor - start_floor) * i // steps
 
-            if self.grids[floor][x][y] in ['wall', 'walla']:
+            if self.buffered_grids[start_floor][x][y] not in ['stair'] and self.buffered_grids[end_floor][x][y] not in ['stair']:
                 return False
 
         return True

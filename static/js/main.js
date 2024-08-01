@@ -631,6 +631,8 @@ function renderStairConnections(ctx) {
             const [y1, x1, floor1] = conn.start;
             const [y2, x2, floor2] = conn.end;
 
+            //console.log(currentFloor, floor1, floor2);
+
             if (floor1 === currentFloor || floor2 === currentFloor) {
                 // Use the same coordinate transformation as other elements
                 const startX = (x1 + 0.5) * cellSize;

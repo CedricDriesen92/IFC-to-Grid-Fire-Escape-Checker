@@ -248,11 +248,10 @@ def get_stair_connections():
         for edge in graph.edges():
             start_node, end_node = edge
             if start_node[2] != end_node[2]:  # Different floors
-                if start_node[2] == floor or end_node[2] == floor:
-                    connections.append({
-                        'start': start_node,
-                        'end': end_node
-                    })
+                connections.append({
+                    'start': start_node,
+                    'end': end_node
+                })
 
         return jsonify(connections)
     except Exception as e:
