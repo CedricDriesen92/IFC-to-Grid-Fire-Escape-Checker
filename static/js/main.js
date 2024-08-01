@@ -40,6 +40,7 @@ let inverseTransform = new DOMMatrix();
 let showBuffer = false;
 let showSpaces = true;
 let cellBufferScale = 100;
+let stairConnections = null;
 
 const MAX_TRAVEL_DISTANCES = {
     daytime: {
@@ -221,6 +222,13 @@ async function uploadFile(event) {
         let result;
         if (file.name.toLowerCase().endsWith('.json')) {
             // Handle JSON file
+            const response = await fetch('/api/process-file', {
+                method: 'POST',
+                body: formData
+            });
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
             const fileContent = await file.text();
             result = JSON.parse(fileContent);
             handleProcessedData(result);
@@ -316,11 +324,17 @@ function handleProcessedData(data) {
     });
 }
 
-function initializeGrid() {
+async function initializeGrid() {
     console.log('Initializing grid...');
     const containerWidth = gridContainer.clientWidth;
     const containerHeight = gridContainer.clientHeight;
     console.log('Container dimensions:', containerWidth, containerHeight);
+
+    if (!bufferedGridData || !bufferedGridData.grids || bufferedGridData.grids.length === 0) {
+        console.error('Buffered grid data is not properly initialized');
+        showError('Error initializing grid data. Please try refreshing the page.');
+        return;
+    }
 
     const gridWidth = bufferedGridData.grids[0][0].length;
     const gridHeight = bufferedGridData.grids[0].length;
@@ -339,9 +353,10 @@ function initializeGrid() {
     document.getElementById('hidden1').hidden = false;
     document.getElementById('hidden2').hidden = false;
     updateZoomLevel();
+    await createOrFetchGraph();
+    await getStairConnections();
     renderGrid(bufferedGridData.grids[currentFloor]);
     updateFloorDisplay();
-    applyWallBuffer();
 }
 
 function drawGridBorders(width, height, cellSize, ctx) {
@@ -391,7 +406,10 @@ function renderGrid(grid) {
     // Render spaces
     if(showSpaces){
         renderSpaces(ctx);
+        renderStairConnections(ctx);
     }
+
+
     // Render path if it exists
     if (pathData && !foundEscapeRoutes) {
         //console.log(pathData);
@@ -554,34 +572,100 @@ function renderSpaces(ctx) {
         const centerY = space.polygon.reduce((sum, p) => sum + p[1], 0) / space.polygon.length;
         const textX = ((centerX - bufferedGridData.bbox.min_x) / bufferedGridData.grid_size + 0.5) * cellSize;
         const textY = ((centerY - bufferedGridData.bbox.min_y) / bufferedGridData.grid_size + 0.5) * cellSize;
-        ctx.strokeText(space.name, textX, textY);
-        ctx.fillText(space.name, textX, textY);
+        ctx.strokeText(space.name, textX, textY-25);
+        ctx.fillText(space.name, textX, textY-25);
         ctx.font = '18px Arial';
         
         if (foundEscapeRoutes) {
             //foundEscapeRoutes.forEach(r=>console.log(r.space_name, " ", space.name));
             const route = foundEscapeRoutes.find(r => r.space_name === space.name);
             if (route && route.distance) {
-                ctx.strokeText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
-                ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY + 15);
+                ctx.strokeText(`Total: ${route.distance.toFixed(2)}m`, textX, textY);
+                ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY);
                 if(route.distance_to_stair >= 0){
-                    ctx.strokeText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
-                    ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 30);
+                    ctx.strokeText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 25);
+                    ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 25);
                 }
             }
             else if(route){
                 //ctx.fillStyle = 'rgba(0, 0, 0, 1)';
-                ctx.strokeText('NO ESCAPE ROUTE FOUND!', textX, textY + 15);
-                ctx.fillText('NO ESCAPE ROUTE FOUND!', textX, textY + 15);
+                ctx.strokeText('NO ESCAPE ROUTE FOUND!', textX, textY);
+                ctx.fillText('NO ESCAPE ROUTE FOUND!', textX, textY);
             }    
             else{
-                ctx.strokeText('Waiting for result...', textX, textY + 15);
-                ctx.fillText('Waiting for result...', textX, textY + 15);
+                ctx.strokeText('Waiting for result...', textX, textY);
+                ctx.fillText('Waiting for result...', textX, textY);
             }
         }
     });
 }
 
+async function getStairConnections() {
+    try {
+        const response = await fetch('/api/get-stair-connections', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                floor: currentFloor
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const connections = await response.json();
+        console.log(connections);
+        stairConnections = connections;
+    } catch (error) {
+        console.error('Error fetching stair connections:', error);
+    }
+}
+
+function renderStairConnections(ctx) {
+    try {
+        const connections = stairConnections;
+        //console.log(stairConnections);
+
+        connections.forEach(conn => {
+            const [y1, x1, floor1] = conn.start;
+            const [y2, x2, floor2] = conn.end;
+
+            if (floor1 === currentFloor || floor2 === currentFloor) {
+                // Use the same coordinate transformation as other elements
+                const startX = (x1 + 0.5) * cellSize;
+                const startY = (y1 + 0.5) * cellSize;
+                const endX = (x2 + 0.5) * cellSize;
+                const endY = (y2 + 0.5) * cellSize;
+
+                ctx.beginPath();
+                if (Math.abs(startX - endX) < cellSize && Math.abs(startY - endY) < cellSize) {
+                    // Zero or very short distance connection
+                    ctx.arc(startX, startY, cellSize / 2, 0, 2 * Math.PI);
+                    ctx.fillStyle = floor2 > floor1 ? 'rgba(0, 0, 255, 0.5)' : 'rgba(255, 0, 255, 0.5)';
+                    ctx.fill();
+                } else {
+                    ctx.moveTo(startX, startY);
+                    ctx.lineTo(endX, endY);
+                    ctx.strokeStyle = 'rgba(0, 0, 255, 0.5)';
+                    if (floor1 >> currentFloor || floor2 >> currentFloor){
+                        ctx.strokeStyle = 'rgba(255, 0, 255, 0.5)';
+                    }
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+            } else {
+                console.log(`Connection not on current floor (${currentFloor}), skipping`);
+            }
+        });
+    } catch (error) {
+        console.error('Error in renderStairConnections:', error);
+        console.error('Error details:', error.message);
+        console.error('Stack trace:', error.stack);
+    }
+}
 
 async function updateSpaces() {
     try {
@@ -1173,6 +1257,33 @@ function highlightPath(path) {
     });
 }
 
+async function createOrFetchGraph() {
+    console.log("Creating or fetching graph...");
+    console.log("Original grids:", originalGridData.grids);
+    console.log("Buffered grids:", bufferedGridData.grids);
+
+    const createGraphResponse = await fetch('/api/create-graph', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            original_grids: originalGridData.grids,
+            buffered_grids: bufferedGridData.grids,
+            grid_size: bufferedGridData.grid_size,
+            floors: bufferedGridData.floors,
+            bbox: bufferedGridData.bbox,
+            allow_diagonal: allowDiagonal
+        })
+    });
+
+    if (!createGraphResponse.ok) {
+        const errorData = await createGraphResponse.json();
+        console.error("Error response:", errorData);
+        throw new Error(`HTTP error! status: ${createGraphResponse.status}, message: ${errorData.error || 'Unknown error'}`);
+    }
+}
+
 async function calculateEscapeRoutes() {
     if (!goals || goals.length === 0) {
         showError('Please set exits before calculating escape routes.');
@@ -1191,24 +1302,8 @@ async function calculateEscapeRoutes() {
 
     // First, create the graph on the server
     try {
-        const createGraphResponse = await fetch('/api/create-graph', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                grids: bufferedGridData.grids,
-                grid_size: bufferedGridData.grid_size,
-                floors: bufferedGridData.floors,
-                bbox: bufferedGridData.bbox,
-                allow_diagonal: allowDiagonal
-            })
-        });
-
-        if (!createGraphResponse.ok) {
-            const errorData = await createGraphResponse.json();
-            throw new Error(`HTTP error! status: ${createGraphResponse.status}, message: ${errorData.error || 'Unknown error'}`);
-        }
+        await createOrFetchGraph();
+        await getStairConnections();
 
         for (let i = 0; i < spacesData.length; i++) {
             const space = spacesData[i];

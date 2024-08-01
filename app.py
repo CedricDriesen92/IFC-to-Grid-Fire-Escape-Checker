@@ -8,8 +8,6 @@ from pathfinding import Pathfinder, find_path, detect_exits, calculate_escape_ro
 import json
 import webbrowser
 from threading import Timer
-import uuid
-
 
 import logging
 import sys, traceback
@@ -37,6 +35,11 @@ def index() -> str:
 
 @app.route('/api/process-file', methods=['POST'])
 def process_file() -> tuple[Dict[str, Any], int]:
+    global graphs
+    global hasGridChanged
+    graphs = None
+    hasGridChanged = True
+    
     if 'file' not in request.files:
         return jsonify({'error': 'No file part'}), 400
     
@@ -50,13 +53,7 @@ def process_file() -> tuple[Dict[str, Any], int]:
         file.save(filepath)
         
         if filename.lower().endswith('.json'):
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-            # Ensure the loaded JSON data has the required structure
-            if validate_json_data(data):
-                return jsonify(data), 200
-            else:
-                return jsonify({'error': 'Invalid JSON structure'}), 400
+            return jsonify({'output': 'Reset...'}), 200
         else:
             grid_size = float(request.form.get('grid_size', 0.1))
             try:
@@ -203,21 +200,63 @@ def api_create_graph():
     global hasGridChanged
     data = request.json
     try:
-        validate_grid_data(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        logger.debug(f"Received data for graph creation: {data.keys()}")
         
-        pathfinder = Pathfinder(data['grids'], data['grid_size'], data['floors'], data['bbox'], data.get('allow_diagonal', False))
-        if hasGridChanged or not graph:
+        required_keys = ['original_grids', 'buffered_grids', 'grid_size', 'floors', 'bbox']
+        for key in required_keys:
+            if key not in data:
+                raise ValueError(f"Missing required key: {key}")
+
+        validate_grid_data(data['buffered_grids'], data['grid_size'], data['floors'], data['bbox'])
+        
+        pathfinder = Pathfinder(
+            data['original_grids'],
+            data['buffered_grids'],
+            data['grid_size'],
+            data['floors'],
+            data['bbox'],
+            data.get('allow_diagonal', False)
+        )
+        if hasGridChanged or not graphs:
             graph = pathfinder.create_graph()
             hasGridChanged = False
-        
-        graphs = (graph, pathfinder)
+            graphs = (graph, pathfinder)
         
         return jsonify({'status': 'success'})
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}", exc_info=True)
         return jsonify({'error': f'Invalid input data: {str(e)}'}), 400
+    except KeyError as e:
+        logger.error(f"Missing key in input data: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Missing key in input data: {str(e)}'}), 400
     except Exception as e:
         logger.error(f"Error creating graph: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/get-stair-connections', methods=['POST'])
+def get_stair_connections():
+    global graphs
+    data = request.json
+    try:
+        if graphs is None:
+            return jsonify({'error': 'Graph not created'}), 400
+
+        graph, pathfinder = graphs
+        floor = data['floor']
+
+        connections = []
+        for edge in graph.edges():
+            start_node, end_node = edge
+            if start_node[2] != end_node[2]:  # Different floors
+                if start_node[2] == floor or end_node[2] == floor:
+                    connections.append({
+                        'start': start_node,
+                        'end': end_node
+                    })
+
+        return jsonify(connections)
+    except Exception as e:
+        logger.error(f"Error getting stair connections: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/calculate-escape-route', methods=['POST'])

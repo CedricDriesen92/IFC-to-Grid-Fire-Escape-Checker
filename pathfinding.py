@@ -11,8 +11,10 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class Pathfinder:
-    def __init__(self, grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = True):
-        self.grids = grids
+    def __init__(self, original_grids: List[List[List[str]]], buffered_grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = True):
+        self.original_grids = original_grids
+        self.buffered_grids = buffered_grids
+        self.grids = buffered_grids
         self.grid_size = grid_size
         self.floors = floors
         self.bbox = bbox
@@ -21,14 +23,13 @@ class Pathfinder:
         self.graph = None
 
     def create_graph(self):
-        if self.graph is None:
-            self.graph = self._create_graph()
+        self.graph = self._create_graph()
         return self.graph
     
     def _create_graph(self) -> nx.Graph:
         G = nx.Graph()
         
-        for floor, grid in enumerate(self.grids):
+        for floor, grid in enumerate(self.buffered_grids):
             for x in range(len(grid)):
                 for y in range(len(grid[0])):
                     if grid[x][y] not in ['wall', 'walla']:
@@ -42,10 +43,11 @@ class Pathfinder:
                         
                         for dx, dy in neighbors:
                             n_x, n_y = x + dx, y + dy
-                            if 0 <= n_x < len(grid) and 0 <= n_y < len(grid[0]) and grid[n_x][n_y] not in ['wall', 'walla']:
-                                neighbor = (n_x, n_y, floor)
-                                weight = self._get_edge_weight(grid[x][y], neighbor=neighbor, is_diagonal=(dx != 0 and dy != 0))
-                                G.add_edge(node, neighbor, weight=weight)
+                            if 0 <= n_x < len(grid) and 0 <= n_y < len(grid[0]):
+                                if grid[n_x][n_y] not in ['wall', 'walla']:
+                                    neighbor = (n_x, n_y, floor)
+                                    weight = self._get_edge_weight(grid[x][y], neighbor=neighbor, is_diagonal=(dx != 0 and dy != 0))
+                                    G.add_edge(node, neighbor, weight=weight)
         
         self._connect_stairs(G)
         
@@ -94,10 +96,6 @@ class Pathfinder:
                                 weight = self._calculate_stair_weight(start_node, end_node, height_diff)
                                 G.add_edge(start_node, end_node, weight=weight)
                                 connected = True
-                                break
-                    if connected:
-                        break
-
                 if not connected:
                     # Fallback to old method if no suitable connection found
                     self._connect_stairs_fallback(G, lower_stairs, upper_stairs)
@@ -417,7 +415,7 @@ class Pathfinder:
 def find_path(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], 
               start: Dict[str, int], goals: List[Dict[str, int]], allow_diagonal: bool = False, minimize_cost: bool = True) -> Tuple[List[Tuple[int, int, int]], Dict[str, float]]:
     try:
-        pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal, minimize_cost)
+        pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox, allow_diagonal, minimize_cost)
         return pathfinder.find_path(start, goals)
     except Exception as e:
         print(f"Error in find_path: {str(e)}")
@@ -425,7 +423,7 @@ def find_path(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[
 
 def detect_exits(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float]) -> List[Tuple[int, int, int]]:
     try:
-        pathfinder = Pathfinder(grids, grid_size, floors, bbox)
+        pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox)
         return pathfinder.detect_exits()
     except Exception as e:
         print(f"Error in detect_exits: {str(e)}")
@@ -439,7 +437,7 @@ def calculate_escape_route(grids: List[List[List[str]]], grid_size: float, floor
         logger.debug(f"Grid size: {grid_size}, Floors: {floors}, Bbox: {bbox}")
         logger.debug(f"Exits: {exits}, Allow diagonal: {allow_diagonal}")
         
-        pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal)
+        pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox, allow_diagonal)
         pathfinder.create_graph()
         result = pathfinder.calculate_escape_route(space, exits)
         
@@ -455,7 +453,7 @@ def calculate_escape_routes(grids: List[List[List[str]]], grid_size: float, floo
                                               allow_diagonal: bool = False) -> List[Dict[str, Any]]:
     try: 
         # Create a single Pathfinder instance
-        pathfinder = Pathfinder(grids, grid_size, floors, bbox, allow_diagonal)
+        pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox, allow_diagonal)
         pathfinder.create_graph()  # Create the graph once
         
         results = []
