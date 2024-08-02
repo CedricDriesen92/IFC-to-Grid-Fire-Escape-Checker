@@ -217,7 +217,8 @@ def api_create_graph():
             data['bbox'],
             data.get('allow_diagonal', False)
         )
-        if hasGridChanged or not graphs:
+        if not graphs:
+        #if hasGridChanged or not graphs:
             graph = pathfinder.create_graph()
             hasGridChanged = False
             graphs = (graph, pathfinder)

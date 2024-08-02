@@ -1253,6 +1253,8 @@ async function findPath() {
     }
 
     try {
+        await createOrFetchGraph();
+        await getStairConnections();
         const response = await fetch('/api/find-path', {
             method: 'POST',
             headers: {
