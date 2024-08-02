@@ -132,7 +132,7 @@ class Pathfinder:
 
                 #print(f"Connecting floors {lower_floor} and {upper_floor}")
                 #print(f"Lower stairs: {lower_stairs}")
-                print(f"Upper stairs: {upper_stairs}")
+                #print(f"Upper stairs: {upper_stairs}")
 
                 height_diff = self.floors[upper_floor]['elevation'] - self.floors[lower_floor]['elevation']
                 horizontal_distance = height_diff / math.tan(stair_angle)
@@ -503,8 +503,8 @@ def check_escape_route_rules(route, grid_size):
             'toSecondExit': 80
         },
         'nighttime': {
-            'toEvacRoute': 10,
-            'toNearestExit': 15,
+            'toEvacRoute': 20,
+            'toNearestExit': 30,
             'toSecondExit': 60
         }
     }

@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Constants
-WALL_TYPES = ['IfcWall', 'IfcWallStandardCase', 'IfcColumn', 'IfcCurtainWall', 'IfcWindow', 'IfcCovering']
+WALL_TYPES = ['IfcWall', 'IfcWallStandardCase', 'IfcColumn', 'IfcCurtainWall', 'IfcWindow']
 FLOOR_TYPES = ['IfcSlab', 'IfcFloor']
 DOOR_TYPES = ['IfcDoor']
 STAIR_TYPES = ['IfcStair', 'IfcStairFlight']
@@ -210,6 +210,7 @@ class IFCProcessor:
             floors = [{'elevation': bbox['min_z'], 'height': bbox['max_z'] - bbox['min_z']}]
 
         logger.info(f"Created {len(floors)} floors")
+        logger.info(floors)
         return bbox, floors
 
     def create_grids(self) -> List[np.ndarray]:
@@ -269,17 +270,18 @@ class IFCProcessor:
             max_z += 1.5/self.unit_size # Extend the floors up so they get detected better
 
         for floor_index, floor in enumerate(self.floors):
-            #print(str(min_z) + " " + str(max_z) + " " + str(floor['elevation']) + " " + str(floor['elevation'] + floor['height']) + " " + str(0.5/self.unit_size))
-            #print( + 0.5/self.unit_size)
-            if min_z < floor['elevation'] + 2/self.unit_size and max_z > floor['elevation'] + 0.5/self.unit_size:
+            if min_z < floor['elevation'] + 2/self.unit_size and max_z > floor['elevation'] + 0.1/self.unit_size:
                 if element_type == 'door':
                     # Use bounding box for doors
                     self.mark_door(floor_index, min_x, min_y, max_x, max_y, floor)
-                elif element_type == 'stair':
+                #elif element_type == 'stair':
                     # Use bounding box for doors
-                    self.mark_stair(floor_index, min_x, min_y, max_x, max_y, floor)
+                #    self.mark_stair(floor_index, min_x, min_y, max_x, max_y, floor)
                 else:
                     # Use detailed geometry for other elements
+                    #if element_type == 'floor':
+                    #    print(faces)
+                    #    print(verts)
                     for i in range(0, len(faces), 3):
                         triangle = [verts[faces[i]*3:faces[i]*3+3],
                                     verts[faces[i+1]*3:faces[i+1]*3+3],
@@ -287,11 +289,22 @@ class IFCProcessor:
                         self.mark_cells(triangle, self.grids[floor_index], floor, element_type)
 
     def mark_door(self, floor_index: int, min_x: float, min_y: float, max_x: float, max_y: float, floor: Dict[str, float]) -> None:
-        start_x = max(0, int((min_x - self.bbox['min_x']) / self.grid_size))
-        end_x = min(self.grids[floor_index].shape[0] - 1, int((max_x - self.bbox['min_x']) / self.grid_size))
-        start_y = max(0, int((min_y - self.bbox['min_y']) / self.grid_size))
-        end_y = min(self.grids[floor_index].shape[1] - 1, int((max_y - self.bbox['min_y']) / self.grid_size))
-
+        start_x = (min_x - self.bbox['min_x']) / self.grid_size
+        end_x = (max_x - self.bbox['min_x']) / self.grid_size
+        start_y = (min_y - self.bbox['min_y']) / self.grid_size
+        end_y = (max_y - self.bbox['min_y']) / self.grid_size
+        size_x = abs(start_x - end_x)
+        size_y = abs(start_y - end_y)
+        if(size_x > size_y): # Extend doors somewhat, prevents them being blocked by walls extending slightly too far.
+            start_y = start_y - 0.1/self.grid_size
+            end_y = end_y + 0.1/self.grid_size
+        else:
+            start_x = start_x - 0.1/self.grid_size
+            end_x = end_x + 0.1/self.grid_size
+        start_x = int(max(0,start_x))
+        end_x = int(min(float(self.grids[floor_index].shape[0] - 1), end_x))
+        start_y = int(max(0, start_y))
+        end_y = int(min(float(self.grids[floor_index].shape[1] - 1), end_y))
         for x in range(start_x, end_x + 1):
             for y in range(start_y, end_y + 1):
                 self.grids[floor_index][x, y] = 'door'
@@ -327,7 +340,7 @@ class IFCProcessor:
         min_z = min(p[2] for p in triangle)
         max_z = max(p[2] for p in triangle)
 
-        if min_z < floor['elevation'] + floor['height'] and max_z > floor['elevation']:
+        if element_type == 'stair' or (element_type == 'floor' and max_z < floor['elevation'] + 1) or (min_z < floor['elevation'] + floor['height'] and max_z > floor['elevation']):
             start_x = max(0, int((min_x - self.bbox['min_x']) / self.grid_size))
             end_x = min(grid.shape[0] - 1, int((max_x - self.bbox['min_x']) / self.grid_size))
             start_y = max(0, int((min_y - self.bbox['min_y']) / self.grid_size))
@@ -352,7 +365,7 @@ class IFCProcessor:
         all_empty = True
 
         for i, grid in enumerate(self.grids):
-            logger.debug(f"Processing grid {i}, shape: {grid.shape}")
+            #logger.debug(f"Processing grid {i}, shape: {grid.shape}")
             non_empty = np.argwhere((grid != 'empty') & (grid != 'floor'))
             if len(non_empty) == 0:
                 logger.warning(f"Grid {i} is entirely empty or floor, skipping trimming")
@@ -362,7 +375,7 @@ class IFCProcessor:
             all_empty = False
             min_x, min_y = non_empty.min(axis=0)
             max_x, max_y = non_empty.max(axis=0)
-            logger.debug(f"Grid {i} non-empty area: ({min_x}, {min_y}) to ({max_x}, {max_y})")
+            #logger.debug(f"Grid {i} non-empty area: ({min_x}, {min_y}) to ({max_x}, {max_y})")
 
             min_x_global = min(min_x_global, min_x)
             max_x_global = max(max_x_global, max_x)
@@ -385,7 +398,7 @@ class IFCProcessor:
                 start_y = max(0, int(min_y_global - padding))
                 end_y = min(grid.shape[1], int(max_y_global + padding + 1))
 
-                logger.debug(f"Trimming grid {i} from ({start_x}, {start_y}) to ({end_x}, {end_y})")
+                #logger.debug(f"Trimming grid {i} from ({start_x}, {start_y}) to ({end_x}, {end_y})")
 
                 trimmed = grid[start_x:end_x, start_y:end_y]
 
@@ -394,7 +407,7 @@ class IFCProcessor:
                 padded[padding:-padding, padding:-padding] = trimmed
 
                 trimmed_grids.append(padded)
-                logger.debug(f"Grid {i} trimmed to shape: {padded.shape}")
+                #logger.debug(f"Grid {i} trimmed to shape: {padded.shape}")
 
             except Exception as e:
                 logger.error(f"Error trimming grid {i}: {str(e)}")

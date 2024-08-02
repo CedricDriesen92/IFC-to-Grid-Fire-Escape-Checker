@@ -2,6 +2,8 @@
 let originalGridData = null;
 let bufferedGridData = null;
 let currentFloor = 0;
+let currentFloorElevation = 0;
+let floorElevations = null;
 let currentType = 'wall';
 let currentTool = 'paint';
 let start = null;
@@ -292,6 +294,7 @@ function exportGrid() {
 function handleProcessedData(data) {
     originalGridData = data;
     bufferedGridData = {...data};
+    console.log(originalGridData.floors);
     spacesData = data.spaces || [];
     console.log('Loaded spaces data:', spacesData);
     
@@ -1634,7 +1637,10 @@ function handleWallBufferChange(e) {
 }
 
 function updateFloorDisplay() {
+    let currentElev = (Math.round(bufferedGridData.floors[currentFloor]['elevation'] * 100) / 100).toFixed(2);
+    let currentHeight = (Math.round((bufferedGridData.floors[currentFloor]['elevation'] + bufferedGridData.floors[currentFloor]['height']) * 100) / 100).toFixed(2);
     document.getElementById('current-floor').textContent = `Floor: ${currentFloor + 1} / ${bufferedGridData.grids.length}`;
+    document.getElementById('current-floor-info').textContent = `Elevation: ${currentElev} m to ${currentHeight} m`;
 }
 
 function showGridEditor() {

@@ -134,8 +134,8 @@ class GridManager:
             raise ValueError("Cannot remove the specified floor")
 
     def apply_wall_buffer(self, buffer_distance: int) -> List[List[List[str]]]:
-        logger.debug(f"Applying wall buffer with distance: {buffer_distance}")
-        logger.debug(f"Original grids shape: {[grid.shape for grid in self.original_grids]}")
+        #logger.debug(f"Applying wall buffer with distance: {buffer_distance}")
+        #logger.debug(f"Original grids shape: {[grid.shape for grid in self.original_grids]}")
         
         try:
             for floor, original_grid in enumerate(self.original_grids):
@@ -153,7 +153,7 @@ class GridManager:
                 
                 self.buffered_grids[floor] = buffered_grid
 
-            logger.debug(f"Buffered grids shape: {[grid.shape for grid in self.buffered_grids]}")
+            #logger.debug(f"Buffered grids shape: {[grid.shape for grid in self.buffered_grids]}")
             return [grid.tolist() for grid in self.buffered_grids]
         except Exception as e:
             logger.error(f"Error in apply_wall_buffer: {str(e)}", exc_info=True)
@@ -190,8 +190,8 @@ class GridManager:
                 0 <= col < self.grids[floor].shape[1])
     
     def detect_spaces(self, include_empty_tiles: bool = False) -> List[Dict[str, Any]]:
-        logger.debug(f"Detecting spaces with include_empty_tiles: {include_empty_tiles}")
-        logger.debug(f"Original grids shape: {[grid.shape for grid in self.original_grids]}")
+        #logger.debug(f"Detecting spaces with include_empty_tiles: {include_empty_tiles}")
+        #logger.debug(f"Original grids shape: {[grid.shape for grid in self.original_grids]}")
         
         try:
             spaces = []
@@ -207,12 +207,12 @@ class GridManager:
                                 border = self._find_space_borders(grid, space['points'], include_empty_tiles)
                                 volume = len(space['points']) * (self.grid_size ** 2)
                                 area = len(border) * self.grid_size
-                                logger.debug(f"Space {space_id} - Volume: {volume}, Area: {area}")
+                                #logger.debug(f"Space {space_id} - Volume: {volume}, Area: {area}")
                                 if volume > 1:
                                     space['polygon'] = self._create_polygon(border)
                                     spaces.append(space)
 
-            logger.debug(f"Detected {len(spaces)} spaces")
+            #logger.debug(f"Detected {len(spaces)} spaces")
             return spaces
         except Exception as e:
             logger.error(f"Error in detect_spaces: {str(e)}", exc_info=True)
@@ -285,8 +285,8 @@ class GridManager:
     
     # Helper function to validate input data
 def validate_grid_data(grids, grid_size, floors, bbox):
-    logger.debug(f"Validating grid data: grid_size={grid_size}, floors={floors}, bbox={bbox}")
-    logger.debug(f"Grids type: {type(grids)}")
+    #logger.debug(f"Validating grid data: grid_size={grid_size}, floors={floors}, bbox={bbox}")
+    #logger.debug(f"Grids type: {type(grids)}")
     
     if not isinstance(grids, list):
         raise ValueError(f"Grids must be a list, got {type(grids)}")
@@ -303,7 +303,7 @@ def validate_grid_data(grids, grid_size, floors, bbox):
             raise ValueError(f"Grid {i} must be a 2D list, got 1D list")
     
     for i, grid in enumerate(grids):
-        logger.debug(f"Validating grid {i}: type={type(grid)}")
+        #logger.debug(f"Validating grid {i}: type={type(grid)}")
         if not isinstance(grid, list):
             raise ValueError(f"Grid {i} must be a list, got {type(grid)}")
         if not grid:
@@ -313,6 +313,6 @@ def validate_grid_data(grids, grid_size, floors, bbox):
             raise ValueError(f"Grid {i} must be a 2D list, got 1D list")
         
         grid_shape = (len(grid), len(grid[0]))
-        logger.debug(f"Grid {i} dimensions: {grid_shape}")
+        #logger.debug(f"Grid {i} dimensions: {grid_shape}")
 
-    logger.debug(f"Grid data validated. Number of grids: {len(grids)}")
+    #logger.debug(f"Grid data validated. Number of grids: {len(grids)}")
