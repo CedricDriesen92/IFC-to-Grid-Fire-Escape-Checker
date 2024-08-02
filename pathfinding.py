@@ -114,7 +114,8 @@ class Pathfinder:
         return visited
 
     def _connect_stairs(self, G: nx.Graph):
-        stair_angle = math.radians(55)  # 55 degree angle for stairs
+        angle = math.radians(55)
+        stair_angle = angle  # 55 degree angle for stairs
         num_directions = 16  # Number of directions to check
         stair_groups = self._group_connected_stairs()
 
@@ -150,6 +151,7 @@ class Pathfinder:
                             end_node = (end_x, end_y, upper_floor)
                             if start_node in G and end_node in G:
                                 weight = self._calculate_stair_weight(start_node, end_node, height_diff)
+                                logger.debug(weight)
                                 G.add_edge(start_node, end_node, weight=weight)
                                 connections_made += 1
                                 #print(f"Connected {start_node} to {end_node} with weight {weight}")

@@ -2,3 +2,5 @@
 /app.spec
 /uploads/
 /__pycache__/
+/build/
+/dist/

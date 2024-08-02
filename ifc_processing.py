@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # Constants
-WALL_TYPES = ['IfcWall', 'IfcWallStandardCase', 'IfcColumn', 'IfcCurtainWall', 'IfcWindow']
+WALL_TYPES = ['IfcWall', 'IfcWallStandardCase', 'IfcColumn', 'IfcCurtainWall', 'IfcWindow', 'IfcCovering']
 FLOOR_TYPES = ['IfcSlab', 'IfcFloor']
 DOOR_TYPES = ['IfcDoor']
 STAIR_TYPES = ['IfcStair', 'IfcStairFlight']
@@ -161,8 +161,10 @@ class IFCProcessor:
             'max_x': float('-inf'), 'max_y': float('-inf'), 'max_z': float('-inf')
         }
         floor_elevations = set()
-
-        for item in self.ifc_file.by_type('IfcWall'):
+        bbox_items = []
+        for type in WALL_TYPES:
+            bbox_items += self.ifc_file.by_type(type)
+        for item in bbox_items:
             if item.Representation:
                 try:
                     shape = ifcopenshell.geom.create_shape(settings, item)
