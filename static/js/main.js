@@ -1340,8 +1340,7 @@ async function createOrFetchGraph() {
 
 async function calculateEscapeRoutes() {
     if (!goals || goals.length === 0) {
-        showError('Please set exits before calculating escape routes.');
-        return;
+        await detectExits();
     }
     await updateSpaces();
 
