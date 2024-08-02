@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, send_from_directory, redirect
+from flask import Flask, request, jsonify, render_template, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 import os
 from typing import List, Dict, Tuple, Any
@@ -8,7 +8,6 @@ from pathfinding import Pathfinder, find_path, detect_exits, calculate_escape_ro
 import json
 import webbrowser
 from threading import Timer
-import easygui
 
 import logging
 import sys, traceback
@@ -289,19 +288,50 @@ def api_calculate_escape_route():
     
 @app.route('/api/update-ifc-with-routes', methods=['POST'])
 def api_update_ifc_with_routes():
-    data = request.json
     try:
+        if 'file' not in request.files:
+            logger.error("No file part in the request")
+            return jsonify({'error': 'No file part'}), 400
         
-        original_file = data['ifc_file'].file
-        filename = data['ifc_file'].filename
-        new_file = os.path.join(app.config['UPLOAD_FOLDER'], "ifc_output",  filename.split(".")[0] + "_withroutes.ifc")
-        foundEscapeRoutes = data['routes']
-        if foundEscapeRoutes:
-            new_ifc_file = add_escape_routes_to_ifc(original_file, new_file, foundEscapeRoutes, data['grid_size'], data['bbox'], data['floors'])
-            print(f"Created new IFC file with escape routes: {new_ifc_file}")
-            return jsonify({'status': 'success'})
+        file = request.files['file']
+        if file.filename == '':
+            logger.error("No selected file")
+            return jsonify({'error': 'No selected file'}), 400
+        
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            logger.info(f"File saved to {filepath}")
+            
+            routes = json.loads(request.form['routes'])
+            grid_size = float(request.form['grid_size'])
+            bbox = json.loads(request.form['bbox'])
+            floors = json.loads(request.form['floors'])
+            
+            output_dir = os.path.join(app.config['UPLOAD_FOLDER'], "ifc_output")
+            os.makedirs(output_dir, exist_ok=True)
+            new_file = os.path.join(output_dir, filename.split(".")[0] + "_withroutes.ifc")
+            
+            logger.info(f"Processing IFC file: {filepath}")
+            logger.info(f"Output file: {new_file}")
+            
+            result = add_escape_routes_to_ifc(filepath, new_file, routes, grid_size, bbox, floors)
+            
+            if os.path.exists(new_file):
+                file_size = os.path.getsize(new_file)
+                logger.info(f"New IFC file created: {new_file}, size: {file_size} bytes")
+                return send_file(new_file, as_attachment=True, download_name=os.path.basename(new_file))
+            else:
+                logger.error(f"Failed to create new IFC file: {new_file}")
+                return jsonify({'error': 'Failed to create updated IFC file'}), 500
+        else:
+            logger.error(f"Invalid file type: {file.filename}")
+            return jsonify({'error': 'Invalid file type'}), 400
     except Exception as e:
-        logger.error(f"Error calculating escape route: {str(e)}", exc_info=True)
+        logger.error(f"Error updating IFC with routes: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
         
         
 @app.route('/static/<path:path>')

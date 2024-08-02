@@ -446,6 +446,7 @@ def process_ifc_file(file_path: str, grid_size: float = 0.1) -> Dict[str, Any]:
 
 def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, floors):
     # Load the existing IFC file
+    logger.info(f"Loading IFC file: {original_file}")
     ifc_file = ifcopenshell.open(original_file)
     
     # Ensure we have a project
@@ -464,6 +465,7 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
     escape_routes_group = ifc_file.create_entity("IfcGroup", Name="EscapeRoutes")
 
     for route in routes:
+        logger.info(f"Processing route for space: {route['space_name']}")
         # Create IfcGroup for the route
         route_group = ifc_file.create_entity("IfcGroup", Name=f"EscapeRoute_{route['space_name']}")
         
@@ -473,6 +475,7 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
         }
         if route['distance_to_stair'] > 0:
             prop_dict.update({"DistanceToFirstStair": route['distance_to_stair']})
+
         violations = route['violations']
         has_violations = False
         # Add route properties
@@ -499,6 +502,7 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
             z = floors[floor_index]['elevation'] + 0.5  # Add 0.5m to make it float above the floor
             points.append((x, y, z))
 
+        logger.info(f"Creating polyline with {len(points)} points")
         curve = builder.polyline(points)
         
         # Create a swept disk solid
@@ -523,14 +527,11 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
         representation = builder.get_representation(body_context, swept_curve)
 
         if has_violations:
-            r = 1
-            g = 0.5
-            b = 0.5
+            r, g, b = 1, 0.5, 0.5  # Red for routes with violations
         else:
-            r = 0.5
-            g = 1
-            b = 0.5
-        # Create a blank style
+            r, g, b = 0.5, 1, 0.5  # Green for routes without violations
+        
+        # Create a style
         style = ifcopenshell.api.run("style.add_style", ifc_file, name="My style")
         # Give that style a surface shading colour
         ifcopenshell.api.run("style.add_surface_style", ifc_file, style=style, ifc_class="IfcSurfaceStyleShading", attributes={
@@ -562,6 +563,4 @@ def add_properties_to_group(ifc_file, group, properties):
     property_set = ifcopenshell.api.run("pset.add_pset", ifc_file, product=group, name="EscapeRouteProperties")
     for name, value in properties.items():
         if name and value:
-            logger.debug(name)
-            logger.debug(value)
             ifcopenshell.api.run("pset.edit_pset", ifc_file, pset=property_set, properties={name: value})

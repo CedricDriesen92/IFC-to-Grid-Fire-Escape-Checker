@@ -92,7 +92,6 @@ const maxStairDistanceDisplay = document.getElementById('max-stair-distance-disp
 const outputText = document.getElementById('result');
 const showBufferCheckbox = document.getElementById('show-buffer');
 const showSpacesCheckbox = document.getElementById('show-spaces');
-document.getElementById('ifc-file-input').addEventListener('change', handleIfcFileSelection);
 
 // Event listeners
 fileUploadForm.addEventListener('submit', uploadFile);
@@ -164,6 +163,7 @@ document.getElementById('find-path').addEventListener('click', findPath);
 //document.getElementById('download-grid').addEventListener('click', downloadGrid);
 document.getElementById('calculate-escape-routes').addEventListener('click', calculateEscapeRoutes);
 document.getElementById('export-grid').addEventListener('click', exportGrid);
+document.getElementById('update-ifc-button').addEventListener('click', updateIfcWithRoutes);
 
 function initializeToolMenus() {
     const paintTool = document.getElementById('paint-tool');
@@ -230,23 +230,11 @@ async function uploadFile(event) {
         if (file.name.toLowerCase().endsWith('.json')) {
             isIFC = false;
             // Handle JSON file
-            const response = await fetch('/api/process-file', {
-                method: 'POST',
-                body: formData
-            });
-            if (!response.ok) {
-                throw new Error('Network response was not ok');
-            }
             const fileContent = await file.text();
             result = JSON.parse(fileContent);
-            handleProcessedData(result);            
-            
-            // Check if corresponding IFC file exists
-            const ifcFileName = file.name.replace('_edited.json', '.ifc');
-            ifcExists = await checkIfcFileExists(ifcFileName);
+            handleProcessedData(result);
         } else {
             isIFC = true;
-            ifcExists = true;
             // Handle IFC file
             const response = await fetch('/api/process-file', {
                 method: 'POST',
@@ -299,7 +287,8 @@ function exportGrid() {
         floors: originalGridData.floors,
         bbox: originalGridData.bbox,
         unit_size: originalGridData.unit_size,
-        spaces: spacesData
+        spaces: spacesData,
+        original_ifc_filename: file ? file.name : null
     };
 
     const jsonString = JSON.stringify(dataToSave, null, 2);
@@ -346,6 +335,13 @@ function handleProcessedData(data) {
     console.log('Grid data seems valid, initializing grid...');
     initializeGrid();
     initializeToolMenus();
+    // Check if an IFC file is linked
+    if (!isIFC) {
+        document.getElementById('ifc-file-input').style.display = 'block';
+    } else {
+        document.getElementById('ifc-file-input').style.display = 'none';
+    }
+    document.getElementById('update-ifc-button').style.display = 'none';
 }
 
 async function initializeGrid() {
@@ -452,16 +448,16 @@ function renderGrid(grid) {
     }
 
     if (foundEscapeRoutes && foundEscapeRoutes.length >= 1) {
-        console.log(foundEscapeRoutes);
+        //console.log(foundEscapeRoutes);
         let totalLength = 0;
         let stairwayDistance = -1;
         let spacesOverMaxDistance = [];
         let spacesWithoutExits = [];
         foundEscapeRoutes.forEach(route => {
             let prevPoint = null;
-            console.log(route);
-            console.log(route['distance']);
-            console.log(route.distance);
+            //console.log(route);
+            //console.log(route['distance']);
+            //console.log(route.distance);
             let hasViolations = false;
             if (route.distance){
                 totalLength = Math.max(totalLength, route.distance);
@@ -698,7 +694,7 @@ async function getStairConnections() {
         }
 
         const connections = await response.json();
-        console.log(connections);
+        //console.log(connections);
         stairConnections = connections;
     } catch (error) {
         console.error('Error fetching stair connections:', error);
@@ -740,7 +736,7 @@ function renderStairConnections(ctx) {
                     ctx.stroke();
                 }
             } else {
-                console.log(`Connection not on current floor (${currentFloor}), skipping`);
+                //console.log(`Connection not on current floor (${currentFloor}), skipping`);
             }
         });
     } catch (error) {
@@ -1445,6 +1441,7 @@ async function calculateEscapeRoutes() {
         showError(`An error occurred while creating the graph: ${error.message}`);
     }
 
+    document.getElementById('update-ifc-button').style.display = 'block';
     hideProgress();
 
     // Display final results
@@ -1460,31 +1457,68 @@ async function calculateEscapeRoutes() {
     renderGrid(bufferedGridData.grids[currentFloor]);
     //await updateIfcWithRoutes();
 }
-async function updateIfcWithRoutes(event){
-    if (!foundEscapeRoutes){
+async function updateIfcWithRoutes() {
+    if (!foundEscapeRoutes) {
         showError(`Please calculate the routes first using the calculate all button`);
+        return;
     }
-    event.preventDefault();
-    const formData = new FormData(event.target);
-    local_file = formData.get('file');
-    if (!local_file){
-        showError('Please attach a .ifc file');
+
+    let ifcFile;
+    if (isIFC) {
+        // If the original upload was an IFC file
+        ifcFile = file;
+    } else if (originalGridData.original_ifc_filename) {
+        // If a JSON was uploaded with a linked IFC file
+        ifcFile = await fetchLinkedIFCFile(originalGridData.original_ifc_filename);
+    } else {
+        // If no IFC file is linked, use the uploaded one
+        const fileInput = document.getElementById('ifc-file-input');
+        if (fileInput.files.length === 0) {
+            showError('Please attach a .ifc file');
+            return;
+        }
+        ifcFile = fileInput.files[0];
     }
-    const response = await fetch('/api/update-ifc-with-routes', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            routes: foundEscapeRoutes,
-            buffered_grids: bufferedGridData.grids,
-            grid_size: bufferedGridData.grid_size,
-            bbox: originalGridData.bbox,
-            floors: bufferedGridData.floors,
-            ifc_file: formData
-        })
-    });
-    console.log(response);
+
+    const formData = new FormData();
+    formData.append('file', ifcFile);
+    formData.append('routes', JSON.stringify(foundEscapeRoutes));
+    formData.append('grid_size', bufferedGridData.grid_size);
+    formData.append('bbox', JSON.stringify(bufferedGridData.bbox));
+    formData.append('floors', JSON.stringify(bufferedGridData.floors));
+
+    try {
+        const response = await fetch('/api/update-ifc-with-routes', {
+            method: 'POST',
+            body: formData
+        });
+
+        if (response.ok) {
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = ifcFile.name.replace('.ifc', '_with_routes.ifc');
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+        } else {
+            const errorData = await response.json();
+            showError(`Error updating IFC: ${errorData.error}`);
+        }
+    } catch (error) {
+        console.error('Error:', error);
+        showError(`An error occurred while updating the IFC file: ${error.message}`);
+    }
+}
+// Helper function to fetch the linked IFC file
+async function fetchLinkedIFCFile(filename) {
+    const response = await fetch(`/api/get-linked-ifc-file/${filename}`);
+    if (!response.ok) {
+        throw new Error('Failed to fetch linked IFC file');
+    }
+    return response.blob();
 }
 
 async function handleIfcFileSelection(event) {
