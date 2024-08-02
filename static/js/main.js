@@ -43,6 +43,10 @@ let showBuffer = false;
 let showSpaces = true;
 let cellBufferScale = 100;
 let stairConnections = null;
+let file = null;
+let isIFC = null;
+let ifcExists = false;
+let global_ifc_file = null;
 
 const MAX_TRAVEL_DISTANCES = {
     daytime: {
@@ -80,7 +84,7 @@ document.getElementById('wall-buffer-display').textContent = '0.4';
 wallBufferSlider.value = 4;
 const allowDiagonalCheckbox = document.getElementById('allow-diagonal');
 const minimizeCostCheckbox = document.getElementById('minimize-cost');
-const exportPathButton = document.getElementById('export-path');
+//const updateIfcForm = document.getElementById('update-ifc-form');
 const detectExitsButton = document.getElementById('detect-exits');
 const spaceDetectionButton = document.getElementById('update-spaces');
 const maxStairDistanceSlider = document.getElementById('max-stair-distance');
@@ -88,6 +92,7 @@ const maxStairDistanceDisplay = document.getElementById('max-stair-distance-disp
 const outputText = document.getElementById('result');
 const showBufferCheckbox = document.getElementById('show-buffer');
 const showSpacesCheckbox = document.getElementById('show-spaces');
+document.getElementById('ifc-file-input').addEventListener('change', handleIfcFileSelection);
 
 // Event listeners
 fileUploadForm.addEventListener('submit', uploadFile);
@@ -106,7 +111,7 @@ allowDiagonal = e.target.checked;
 minimizeCostCheckbox.addEventListener('change', (e) => {
     minimizeCost = e.target.checked;
 });
-exportPathButton.addEventListener('click', exportPath);
+//updateIfcForm.addEventListener('submit', updateIfcWithRoutes);
 gridContainer.addEventListener('contextmenu', (e) => e.preventDefault());
 detectExitsButton.addEventListener('click', detectExits);
 document.getElementById('include-empty-tiles').addEventListener('change', (e) => {
@@ -216,13 +221,14 @@ function initializeToolMenus() {
 async function uploadFile(event) {
     event.preventDefault();
     const formData = new FormData(event.target);
-    const file = formData.get('file');
+    file = formData.get('file');
 
     showProgress('Initializing...');
 
     try {
         let result;
         if (file.name.toLowerCase().endsWith('.json')) {
+            isIFC = false;
             // Handle JSON file
             const response = await fetch('/api/process-file', {
                 method: 'POST',
@@ -233,8 +239,14 @@ async function uploadFile(event) {
             }
             const fileContent = await file.text();
             result = JSON.parse(fileContent);
-            handleProcessedData(result);
+            handleProcessedData(result);            
+            
+            // Check if corresponding IFC file exists
+            const ifcFileName = file.name.replace('_edited.json', '.ifc');
+            ifcExists = await checkIfcFileExists(ifcFileName);
         } else {
+            isIFC = true;
+            ifcExists = true;
             // Handle IFC file
             const response = await fetch('/api/process-file', {
                 method: 'POST',
@@ -255,6 +267,23 @@ async function uploadFile(event) {
         showError('An error occurred while processing the file.');
     } finally {
         hideProgress();
+    }
+}
+
+async function checkIfcFileExists(fileName) {
+    try {
+        const response = await fetch('/api/check-ifc-file', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ fileName: fileName })
+        });
+        const data = await response.json();
+        return data.exists;
+    } catch (error) {
+        console.error('Error checking IFC file existence:', error);
+        return false;
     }
 }
 
@@ -1429,6 +1458,59 @@ async function calculateEscapeRoutes() {
     `;
 
     renderGrid(bufferedGridData.grids[currentFloor]);
+    //await updateIfcWithRoutes();
+}
+async function updateIfcWithRoutes(event){
+    if (!foundEscapeRoutes){
+        showError(`Please calculate the routes first using the calculate all button`);
+    }
+    event.preventDefault();
+    const formData = new FormData(event.target);
+    local_file = formData.get('file');
+    if (!local_file){
+        showError('Please attach a .ifc file');
+    }
+    const response = await fetch('/api/update-ifc-with-routes', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            routes: foundEscapeRoutes,
+            buffered_grids: bufferedGridData.grids,
+            grid_size: bufferedGridData.grid_size,
+            bbox: originalGridData.bbox,
+            floors: bufferedGridData.floors,
+            ifc_file: formData
+        })
+    });
+    console.log(response);
+}
+
+async function handleIfcFileSelection(event) {
+    const selectedFile = event.target.files[0];
+    if (selectedFile) {
+        const formData = new FormData();
+        formData.append('file', selectedFile);
+
+        try {
+            const response = await fetch('/api/process-file', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
+            }
+
+            const result = await response.json();
+            // Merge the IFC data with the existing JSON data
+            mergeIfcDataWithJson(result);
+        } catch (error) {
+            console.error('Error processing IFC file:', error);
+            showError('An error occurred while processing the IFC file.');
+        }
+    }
 }
 
 function displayViolations(spacesWithViolations) {
@@ -1673,132 +1755,6 @@ function showError(message) {
 function showMessage(message) {
     console.log(message);
     alert(message);  // You can replace this with a more sophisticated message display method
-}
-
-function downloadGrid() {
-    if (!originalGridData) {
-        showError('No grid data available. Please upload or create a grid first.');
-        return;
-    }
-
-    const dataToSave = {
-        grids: originalGridData.grids,
-        grid_size: originalGridData.grid_size,
-        floors: originalGridData.floors,
-        bbox: originalGridData.bbox
-    };
-
-    const jsonString = JSON.stringify(dataToSave, null, 2);
-    const blob = new Blob([jsonString], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-
-    const downloadLink = document.createElement('a');
-    downloadLink.href = url;
-    downloadLink.download = 'edited_grid.json';
-
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    document.body.removeChild(downloadLink);
-
-    URL.revokeObjectURL(url);
-}
-
-function exportPath() {
-    if (!pathData || pathData.length === 0) {
-        showError('No path to export. Please find a path first.');
-        return;
-    }
-
-    const pathByFloor = {};
-    pathData.forEach(point => {
-        const [x, y, floor] = point;
-        if (!pathByFloor[floor]) {
-            pathByFloor[floor] = [];
-        }
-        pathByFloor[floor].push([x, y]);
-    });
-
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const floorCount = Object.keys(pathByFloor).length;
-    const padding = 20;
-    const floorHeight = (bufferedGridData.grids[0].length * cellSize) + padding;
-    
-    canvas.width = bufferedGridData.grids[0][0].length * cellSize;
-    canvas.height = floorHeight * floorCount;
-
-    Object.entries(pathByFloor).forEach(([floor, path], index) => {
-        const yOffset = index * floorHeight;
-        
-        // Draw floor label
-        ctx.fillStyle = 'black';
-        ctx.font = '16px Arial';
-        const pathLengths = JSON.parse(document.getElementById('result').getAttribute('data-path-lengths'));
-        let yPosition = canvas.height - padding;
-        ctx.fillText(`Total path length: ${pathLengths.total_length.toFixed(2)} meters`, padding, yPosition);
-        yPosition -= 20;
-        ctx.fillText(`Distance to stairway: ${pathLengths.stairway_distance.toFixed(2)} meters`, padding, yPosition);
-        for (const [floor, length] of Object.entries(pathLengths.floor_lengths)) {
-            yPosition -= 20;
-            ctx.fillText(`Floor ${parseInt(floor.split('_')[1]) + 1} length: ${length.toFixed(2)} meters`, padding, yPosition);
-        }    
-
-        // Draw grid
-        bufferedGridData.grids[floor].forEach((row, i) => {
-            row.forEach((cell, j) => {
-                ctx.fillStyle = getCellColor(cell);
-                ctx.fillRect(j * cellSize, yOffset + i * cellSize + padding, cellSize, cellSize);
-            });
-        });
-
-        // Draw path
-        ctx.strokeStyle = 'blue';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        path.forEach(([x, y], i) => {
-            const canvasX = y * cellSize + cellSize / 2;
-            const canvasY = yOffset + x * cellSize + cellSize / 2 + padding;
-            if (i === 0) {
-                ctx.moveTo(canvasX, canvasY);
-            } else {
-                ctx.lineTo(canvasX, canvasY);
-            }
-        });
-        ctx.stroke();
-
-        // Draw start and end points
-        if (index === 0) {
-            ctx.fillStyle = 'green';
-            const [startX, startY] = path[0];
-            ctx.beginPath();
-            ctx.arc(startY * cellSize + cellSize / 2, yOffset + startX * cellSize + cellSize / 2 + padding, cellSize / 2, 0, 2 * Math.PI);
-            ctx.fill();
-        }
-        if (index === floorCount - 1) {
-            ctx.fillStyle = 'red';
-            const [endX, endY] = path[path.length - 1];
-            ctx.beginPath();
-            ctx.arc(endY * cellSize + cellSize / 2, yOffset + endX * cellSize + cellSize / 2 + padding, cellSize / 2, 0, 2 * Math.PI);
-            ctx.fill();
-        }
-    });
-
-    // Add path length at the bottom
-    ctx.fillStyle = 'black';
-    ctx.font = '16px Arial';
-    ctx.fillText(`Path length: ${pathLength.toFixed(2)} meters`, padding, canvas.height - padding);
-
-    // Convert canvas to blob and download
-    canvas.toBlob(function(blob) {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
-        a.download = 'path_export.png';
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-    });
 }
 
 // Initialize the application

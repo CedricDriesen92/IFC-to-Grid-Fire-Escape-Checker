@@ -2,12 +2,13 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 from werkzeug.utils import secure_filename
 import os
 from typing import List, Dict, Tuple, Any
-from ifc_processing import process_ifc_file
+from ifc_processing import process_ifc_file, add_escape_routes_to_ifc
 from grid_management import GridManager, validate_grid_data
 from pathfinding import Pathfinder, find_path, detect_exits, calculate_escape_route, calculate_escape_routes, check_escape_route_rules
 import json
 import webbrowser
 from threading import Timer
+import easygui
 
 import logging
 import sys, traceback
@@ -18,8 +19,9 @@ logger = logging.getLogger(__name__)
 
 # Last created graph
 graphs = None
-
 hasGridChanged = True
+ifc_filepath = None
+origin_filepath = None
 
 if getattr(sys, 'frozen', False):
     template_folder = os.path.join(sys._MEIPASS, 'templates')
@@ -37,6 +39,8 @@ def index() -> str:
 def process_file() -> tuple[Dict[str, Any], int]:
     global graphs
     global hasGridChanged
+    global ifc_filepath
+    global origin_filepath
     graphs = None
     hasGridChanged = True
     
@@ -50,11 +54,14 @@ def process_file() -> tuple[Dict[str, Any], int]:
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        origin_filepath = filepath
         file.save(filepath)
         
         if filename.lower().endswith('.json'):
+            ifc_filepath = filename.replace('_edited.json', '.ifc')
             return jsonify({'output': 'Reset...'}), 200
         else:
+            ifc_filepath = filename
             grid_size = float(request.form.get('grid_size', 0.1))
             try:
                 result = process_ifc_file(filepath, grid_size)
@@ -279,7 +286,24 @@ def api_calculate_escape_route():
     except Exception as e:
         logger.error(f"Error calculating escape route: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
-
+    
+@app.route('/api/update-ifc-with-routes', methods=['POST'])
+def api_update_ifc_with_routes():
+    data = request.json
+    try:
+        
+        original_file = data['ifc_file'].file
+        filename = data['ifc_file'].filename
+        new_file = os.path.join(app.config['UPLOAD_FOLDER'], "ifc_output",  filename.split(".")[0] + "_withroutes.ifc")
+        foundEscapeRoutes = data['routes']
+        if foundEscapeRoutes:
+            new_ifc_file = add_escape_routes_to_ifc(original_file, new_file, foundEscapeRoutes, data['grid_size'], data['bbox'], data['floors'])
+            print(f"Created new IFC file with escape routes: {new_ifc_file}")
+            return jsonify({'status': 'success'})
+    except Exception as e:
+        logger.error(f"Error calculating escape route: {str(e)}", exc_info=True)
+        
+        
 @app.route('/static/<path:path>')
 def send_static(path: str) -> Any:
     return send_from_directory('static', path)

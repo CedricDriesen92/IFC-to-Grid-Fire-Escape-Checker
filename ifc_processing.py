@@ -1,10 +1,18 @@
 import ifcopenshell
 import ifcopenshell.geom
+import ifcopenshell.util.element
 import ifcopenshell.util.placement
+import ifcopenshell.util.representation
+import ifcopenshell.util.shape_builder
+import ifcopenshell.api
+import bpy
+import uuid
+import math
 import numpy as np
 from typing import Dict, List, Tuple, Any
 import traceback
 import logging
+import os
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -435,3 +443,125 @@ class IFCProcessor:
 def process_ifc_file(file_path: str, grid_size: float = 0.1) -> Dict[str, Any]:
     processor = IFCProcessor(file_path, grid_size)
     return processor.process()
+
+def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, floors):
+    # Load the existing IFC file
+    ifc_file = ifcopenshell.open(original_file)
+    
+    # Ensure we have a project
+    if not ifc_file.by_type("IfcProject"):
+        project = ifcopenshell.api.run("root.create_entity", ifc_file, ifc_class="IfcProject")
+    else:
+        project = ifc_file.by_type("IfcProject")[0]
+    
+    # Create a new IfcUnitAssignment if it doesn't exist
+    if not ifc_file.by_type("IfcUnitAssignment"):
+        units = ifcopenshell.api.run("unit.add_si_unit", ifc_file, unit_type="LENGTHUNIT", prefix="MILLI")
+    else:
+        units = ifc_file.by_type("IfcUnitAssignment")[0]
+
+    # Create IfcGroup for all escape routes
+    escape_routes_group = ifc_file.create_entity("IfcGroup", Name="EscapeRoutes")
+
+    for route in routes:
+        # Create IfcGroup for the route
+        route_group = ifc_file.create_entity("IfcGroup", Name=f"EscapeRoute_{route['space_name']}")
+        
+        prop_dict = {
+            "RoomName": route['space_name'],
+            "TotalPathLength": route['distance']
+        }
+        if route['distance_to_stair'] > 0:
+            prop_dict.update({"DistanceToFirstStair": route['distance_to_stair']})
+        violations = route['violations']
+        has_violations = False
+        # Add route properties
+        if violations['general']:
+            prop_dict.update({"General violations", violations['general']})
+            has_violations = True
+        if violations['daytime']:
+            prop_dict.update({"Daytime violations", violations['daytime']})
+            has_violations = True
+        if violations['nighttime']:
+            prop_dict.update({"Nighttime violations", violations['daytime']})
+            has_violations = True
+        add_properties_to_group(ifc_file, route_group, prop_dict)
+
+        # Create a shape builder
+        builder = ifcopenshell.util.shape_builder.ShapeBuilder(ifc_file)
+        
+        # Convert coordinates to the correct format
+        points = []
+        for p in route['optimal_path']:
+            x = float(p[0] * grid_size) + bbox['min_x']
+            y = float(p[1] * grid_size) + bbox['min_y']
+            floor_index = int(p[2])
+            z = floors[floor_index]['elevation'] + 0.5  # Add 0.5m to make it float above the floor
+            points.append((x, y, z))
+
+        curve = builder.polyline(points)
+        
+        # Create a swept disk solid
+        radius = 0.1  # Base radius of 10cm
+        swept_curve = builder.create_swept_disk_solid(curve, radius)
+        
+        # Create IfcBuildingElementProxy for the route
+        ifc_route = ifc_file.create_entity("IfcBuildingElementProxy")
+        ifc_route.Name = f"EscapeRoute_{route['space_name']}"
+
+        # Get or create the body context
+        body_context = ifcopenshell.util.representation.get_context(ifc_file, "Model", "Body", "MODEL_VIEW")
+        if not body_context:
+            model_context = ifcopenshell.api.run("context.add_context", ifc_file, context_type="Model")
+            body_context = ifcopenshell.api.run("context.add_context", ifc_file, 
+                                                context_type="Model", 
+                                                context_identifier="Body", 
+                                                target_view="MODEL_VIEW", 
+                                                parent=model_context)
+        
+        # Create shape representation
+        representation = builder.get_representation(body_context, swept_curve)
+
+        if has_violations:
+            r = 1
+            g = 0.5
+            b = 0.5
+        else:
+            r = 0.5
+            g = 1
+            b = 0.5
+        # Create a blank style
+        style = ifcopenshell.api.run("style.add_style", ifc_file, name="My style")
+        # Give that style a surface shading colour
+        ifcopenshell.api.run("style.add_surface_style", ifc_file, style=style, ifc_class="IfcSurfaceStyleShading", attributes={
+                    "SurfaceColour": { "Name": None, "Red": r, "Green": g, "Blue": b }
+                })
+        # Assign the style to your geometry's representation (IfcShapeRepresentation)
+        ifcopenshell.api.run("style.assign_representation_styles", ifc_file, shape_representation=representation, styles=[style])
+        
+        # Assign shape to the product
+        ifcopenshell.api.run("geometry.assign_representation", ifc_file, product=ifc_route, representation=representation)
+
+        # Add route to route group
+        rel = ifc_file.create_entity("IfcRelAssignsToGroup", GlobalId=ifcopenshell.guid.new())
+        rel.RelatingGroup = route_group
+        rel.RelatedObjects = [ifc_route]
+
+        # Add route group to main escape routes group
+        rel = ifc_file.create_entity("IfcRelAssignsToGroup", GlobalId=ifcopenshell.guid.new())
+        rel.RelatingGroup = escape_routes_group
+        rel.RelatedObjects = [route_group]
+    
+    ifc_file.write(new_file)
+    return {"new_file_path": new_file}
+
+def create_group(ifc_file, name):
+    return ifcopenshell.api.run("group.add_group", ifc_file, name=name)
+
+def add_properties_to_group(ifc_file, group, properties):
+    property_set = ifcopenshell.api.run("pset.add_pset", ifc_file, product=group, name="EscapeRouteProperties")
+    for name, value in properties.items():
+        if name and value:
+            logger.debug(name)
+            logger.debug(value)
+            ifcopenshell.api.run("pset.edit_pset", ifc_file, pset=property_set, properties={name: value})
