@@ -114,65 +114,63 @@ class Pathfinder:
         return visited
 
     def _connect_stairs(self, G: nx.Graph):
-        angle = math.radians(55)
+        angle = 45
         stair_angle = angle  # 55 degree angle for stairs
         num_directions = 16  # Number of directions to check
         stair_groups = self._group_connected_stairs()
 
-        #print(f"Found {len(stair_groups)} stair groups")
-
         for group_index, group in enumerate(stair_groups):
-            #print(f"Processing stair group {group_index + 1}")
             floors = sorted(set(floor for _, _, floor in group))
-            #print(f"Group contains stairs on floors: {floors}")
             
             for i in range(len(floors) - 1):
                 lower_floor, upper_floor = floors[i], floors[i + 1]
                 lower_stairs = [pos for pos in group if pos[2] == lower_floor]
                 upper_stairs = [pos for pos in group if pos[2] == upper_floor]
 
-                #print(f"Connecting floors {lower_floor} and {upper_floor}")
-                #print(f"Lower stairs: {lower_stairs}")
-                #print(f"Upper stairs: {upper_stairs}")
-
                 height_diff = self.floors[upper_floor]['elevation'] - self.floors[lower_floor]['elevation']
-                horizontal_distance = height_diff / math.tan(stair_angle)
-                grid_distance = int(round(horizontal_distance / self.grid_size))
+                iter_angle = stair_angle
+                while iter_angle <= 80:
+                    horizontal_distance = height_diff / math.tan(math.radians(iter_angle))
+                    grid_distance = int(round(horizontal_distance / self.grid_size))
 
-                #print(f"Height difference: {height_diff}")
-                print(f"Calculated horizontal distance: {horizontal_distance}")
-                #print(f"Grid distance: {grid_distance}")
+                    #print(f"Height difference: {height_diff}")
+                    print(f"Calculated horizontal distance: {horizontal_distance}")
+                    #print(f"Grid distance: {grid_distance}")
 
-                connections_made = 0
-                for start_x, start_y, _ in lower_stairs:
-                    for end_x, end_y, _ in upper_stairs:
-                        if self._check_stair_connection(start_x, start_y, lower_floor, end_x, end_y, upper_floor, grid_distance, num_directions):
-                            start_node = (start_x, start_y, lower_floor)
-                            end_node = (end_x, end_y, upper_floor)
-                            if start_node in G and end_node in G:
-                                weight = self._calculate_stair_weight(start_node, end_node, height_diff)
-                                logger.debug(weight)
-                                G.add_edge(start_node, end_node, weight=weight)
-                                connections_made += 1
-                                #print(f"Connected {start_node} to {end_node} with weight {weight}")
-                        #else:
-                        #    print(f"Failed to connect {(start_x, start_y, lower_floor)} to {(end_x, end_y, upper_floor)}")
-                
+                    connections_made = 0
+                    for start_x, start_y, _ in lower_stairs:
+                        for end_x, end_y, _ in upper_stairs:
+                            if self._check_stair_connection(start_x, start_y, lower_floor, end_x, end_y, upper_floor, horizontal_distance, num_directions):
+                                start_node = (start_x, start_y, lower_floor)
+                                end_node = (end_x, end_y, upper_floor)
+                                if start_node in G and end_node in G:
+                                    weight = self._calculate_stair_weight(start_node, end_node, height_diff)
+                                    #logger.debug(weight)
+                                    G.add_edge(start_node, end_node, weight=weight)
+                                    connections_made += 1
+                                    #print(f"Connected {start_node} to {end_node} with weight {weight}")
+                            #else:
+                            #    print(f"Failed to connect {(start_x, start_y, lower_floor)} to {(end_x, end_y, upper_floor)}")
+                    if connections_made > 0:
+                        break
+                    else:
+                        iter_angle += 10
                 if connections_made == 0:
                     print(f"No connections made between floors {lower_floor} and {upper_floor}, using fallback method")
                     self._connect_stairs_fallback(G, lower_stairs, upper_stairs)
                 else:
-                    print(f"Made {connections_made} connections between floors {lower_floor} and {upper_floor}")
+                    print(f"Made {connections_made} connections between floors {lower_floor} and {upper_floor} at angle {iter_angle}")
 
     def _check_stair_connection(self, start_x, start_y, start_floor, end_x, end_y, end_floor, grid_distance, num_directions):
         angle_step = 2 * math.pi / num_directions
+        grid_distance /= self.grid_size
         for i in range(num_directions):
             angle = i * angle_step
             dx = int(round(grid_distance * math.cos(angle)))
             dy = int(round(grid_distance * math.sin(angle)))
             
             if start_x + dx == end_x and start_y + dy == end_y:
-                return self._check_path(start_x, start_y, start_floor, end_x, end_y, end_floor)
+                return True#self._check_path(start_x, start_y, start_floor, end_x, end_y, end_floor)
         
         return False
 
@@ -197,9 +195,15 @@ class Pathfinder:
         return True
 
     def _calculate_stair_weight(self, start_node, end_node, height_diff):
-        horizontal_distance = math.sqrt((end_node[0] - start_node[0])**2 + (end_node[1] - start_node[1])**2) * self.grid_size
-        actual_distance = math.sqrt(height_diff**2 + horizontal_distance**2)
-        return self._get_edge_weight('stair') * actual_distance / self.grid_size
+        horizontal_distance = math.sqrt((end_node[0] - start_node[0])**2 + (end_node[1] - start_node[1])**2)
+        actual_horizontal_distance = horizontal_distance * self.grid_size
+        if height_diff > actual_horizontal_distance:
+            actual_horizontal_distance = height_diff #for angles that are too high assume 45 degree stairs
+        actual_distance = math.sqrt(height_diff**2 + (horizontal_distance * self.grid_size)**2)
+        # Convert actual distance back to grid units
+        grid_units_distance = actual_distance / self.grid_size
+        #logger.debug(grid_units_distance)
+        return self._get_edge_weight('stair') * grid_units_distance
 
     def _connect_stairs_fallback(self, G, lower_stairs, upper_stairs):
         for lower_x, lower_y, lower_floor in lower_stairs:
@@ -494,6 +498,7 @@ def calculate_escape_routes(grids: List[List[List[str]]], grid_size: float, floo
 
 def check_escape_route_rules(route, grid_size):
     violations = {
+        'general': [],
         'daytime': [],
         'nighttime': []
     }
@@ -515,10 +520,10 @@ def check_escape_route_rules(route, grid_size):
     print("Distance to exit:")
     print(route['distance'])
     for time_of_day in ['daytime', 'nighttime']:
-        if route['distance_to_stair'] > max_travel_distances[time_of_day]['toEvacRoute']:
+        if route['distance_to_stair'] and route['distance_to_stair'] > max_travel_distances[time_of_day]['toEvacRoute']:
             violations[time_of_day].append(f"Distance to evacuation route ({route['distance_to_stair']:.2f}m) exceeds maximum ({max_travel_distances[time_of_day]['toEvacRoute']}m)")
         
-        if route['distance'] > max_travel_distances[time_of_day]['toNearestExit']:
+        if route['distance'] and route['distance'] > max_travel_distances[time_of_day]['toNearestExit']:
             violations[time_of_day].append(f"Distance to nearest exit ({route['distance']:.2f}m) exceeds maximum ({max_travel_distances[time_of_day]['toNearestExit']}m)")
 
     # Check dead-end length (if available)
@@ -534,5 +539,8 @@ def check_escape_route_rules(route, grid_size):
         elif route['stairway_distance'] > 60:
             violations['daytime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) exceeds maximum (60m)")
             violations['nighttime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) exceeds maximum (60m)")
+    
+    if not route['distance']:
+        violations['general'].append("No escape route found!")
     print(violations)
     return violations

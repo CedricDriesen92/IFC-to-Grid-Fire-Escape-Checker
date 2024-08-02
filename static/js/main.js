@@ -1329,7 +1329,8 @@ async function createOrFetchGraph() {
             grid_size: bufferedGridData.grid_size,
             floors: bufferedGridData.floors,
             bbox: bufferedGridData.bbox,
-            allow_diagonal: allowDiagonal
+            allow_diagonal: allowDiagonal,
+            minimize_cost: minimizeCost,
         })
     });
 
@@ -1353,7 +1354,7 @@ async function calculateEscapeRoutes() {
     let spacesOverMaxDistance = [];
     let spacesWithoutExits = [];
 
-    showProgress('Calculating escape routes...');
+    showProgress('Calculating graph...');
 
     // First, create the graph on the server
     try {
@@ -1386,7 +1387,7 @@ async function calculateEscapeRoutes() {
 
                 // Check rules
                 const violations = data.escape_route.violations;
-                if (violations['daytime'].length > 0 || violations['nighttime'].length > 0) {
+                if (violations['general'].length > 0 || violations['daytime'].length > 0 || violations['nighttime'].length > 0) {
                     spacesWithViolations.push({space: space.name, violations});
                 }
 
