@@ -12,7 +12,10 @@ import numpy as np
 from typing import Dict, List, Tuple, Any
 import traceback
 import logging
-import os
+import os, sys
+import mathutils
+
+from contextlib import contextmanager
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -444,123 +447,254 @@ def process_ifc_file(file_path: str, grid_size: float = 0.1) -> Dict[str, Any]:
     processor = IFCProcessor(file_path, grid_size)
     return processor.process()
 
+def create_escape_route_segment(ifcfile, sb, body, storey, start_point, end_point, width=0.4, height=1.5, unit_scale=1.0):
+    # Create the escape route segment as an IfcBuildingElementProxy
+    width = width/unit_scale
+    height = height/unit_scale
+    escape_route_segment = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name="EscapeRouteSegment")
+
+    # Calculate direction and length
+    direction = mathutils.Vector(end_point) - mathutils.Vector(start_point)
+    length = direction.length / unit_scale
+
+    # Create profile (rectangle)
+    profile_points = [
+        (0.0, -width/2), (0.0, width/2),
+        (float(length), width/2), (float(length), -width/2), (0.0, -width/2)
+    ]
+    profile_points = [ifcfile.createIfcCartesianPoint(list(map(float, point))) for point in profile_points]
+    polyline = ifcfile.createIfcPolyline(profile_points)
+    
+    # Create IfcArbitraryClosedProfileDef
+    profile = ifcfile.createIfcArbitraryClosedProfileDef("AREA", None, polyline)
+
+    # Create extrusion
+    extrusion_vector = ifcfile.createIfcDirection((0.0, 0.0, 1.0))
+    position = ifcfile.createIfcAxis2Placement3D(
+        ifcfile.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+        ifcfile.createIfcDirection((0.0, 0.0, 1.0)),
+        ifcfile.createIfcDirection((1.0, 0.0, 0.0))
+    )
+    extruded_solid = ifcfile.createIfcExtrudedAreaSolid(profile, position, extrusion_vector, float(height))
+
+    # Get representation
+    representation = sb.get_representation(body, extruded_solid)
+
+    # Assign representation
+    ifcopenshell.api.run("geometry.assign_representation", ifcfile, product=escape_route_segment, representation=representation)
+
+    # Assign to storey
+    with suppress_stdout():
+        ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=escape_route_segment)
+
+    # Set placement
+    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=escape_route_segment)
+
+    # Rotate and translate to correct position
+    rotation = direction.to_track_quat('X', 'Z')
+    translation = mathutils.Vector(start_point)
+    
+    matrix = mathutils.Matrix.Translation(translation) @ rotation.to_matrix().to_4x4()
+    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=escape_route_segment, matrix=matrix)
+
+    return escape_route_segment
+
 def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, floors):
-    # Load the existing IFC file
-    logger.info(f"Loading IFC file: {original_file}")
-    ifc_file = ifcopenshell.open(original_file)
+    ifcfile = ifcopenshell.open(original_file)
+
+    # Detect the length unit
+    project = ifcfile.by_type("IfcProject")[0]
+    unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifcfile)#, unit_type="si_meters")
+
     
-    # Ensure we have a project
-    if not ifc_file.by_type("IfcProject"):
-        project = ifcopenshell.api.run("root.create_entity", ifc_file, ifc_class="IfcProject")
-    else:
-        project = ifc_file.by_type("IfcProject")[0]
+    logger.debug(f"Detected unit scale: {unit_scale}")
     
-    # Create a new IfcUnitAssignment if it doesn't exist
-    if not ifc_file.by_type("IfcUnitAssignment"):
-        units = ifcopenshell.api.run("unit.add_si_unit", ifc_file, unit_type="LENGTHUNIT", prefix="MILLI")
-    else:
-        units = ifc_file.by_type("IfcUnitAssignment")[0]
+    # Get or create necessary IFC elements
+    project = ifcfile.by_type("IfcProject")[0]
+    site = ifcfile.by_type("IfcSite")[0] if ifcfile.by_type("IfcSite") else ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcSite")
+    building = ifcfile.by_type("IfcBuilding")[0] if ifcfile.by_type("IfcBuilding") else ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuilding")
+    
+    # Ensure site and building are in the project structure
+    with suppress_stdout():
+        ifcopenshell.api.run("aggregate.assign_object", ifcfile, relating_object=project, product=site)
+        ifcopenshell.api.run("aggregate.assign_object", ifcfile, relating_object=site, product=building)
+
+    # Get or create a storey
+    storey = ifcfile.by_type("IfcBuildingStorey")[0] if ifcfile.by_type("IfcBuildingStorey") else ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingStorey")
+    with suppress_stdout():
+        ifcopenshell.api.run("aggregate.assign_object", ifcfile, relating_object=building, product=storey)
+
+    # Get context
+    body = ifcopenshell.util.representation.get_context(ifcfile, "Model", "Body", "MODEL_VIEW")
+    if not body:
+        model = ifcopenshell.api.run("context.add_context", ifcfile, context_type="Model")
+        body = ifcopenshell.api.run("context.add_context", ifcfile, 
+                                            context_type="Model", 
+                                            context_identifier="Body", 
+                                            target_view="MODEL_VIEW", 
+                                            parent=model)
+    
+    # Create shape builder
+    sb = ifcopenshell.util.shape_builder.ShapeBuilder(ifcfile)
 
     # Create IfcGroup for all escape routes
-    escape_routes_group = ifc_file.create_entity("IfcGroup", Name="EscapeRoutes")
+    escape_routes_group = ifcfile.create_entity("IfcGroup", Name="EscapeRoutes")
 
     for route in routes:
         logger.info(f"Processing route for space: {route['space_name']}")
+        
         # Create IfcGroup for the route
-        route_group = ifc_file.create_entity("IfcGroup", Name=f"EscapeRoute_{route['space_name']}")
+        route_group = ifcfile.create_entity("IfcGroup", Name=f"EscapeRoute_{route['space_name']}")
         
+        # Prepare route properties
         prop_dict = {
-            "RoomName": route['space_name'],
-            "TotalPathLength": route['distance']
+            "RoomName": route['space_name']
         }
-        if route['distance_to_stair'] > 0:
-            prop_dict.update({"DistanceToFirstStair": route['distance_to_stair']})
-
-        violations = route['violations']
-        has_violations = False
-        # Add route properties
-        if violations['general']:
-            prop_dict.update({"General violations", violations['general']})
-            has_violations = True
-        if violations['daytime']:
-            prop_dict.update({"Daytime violations", violations['daytime']})
-            has_violations = True
-        if violations['nighttime']:
-            prop_dict.update({"Nighttime violations", violations['daytime']})
-            has_violations = True
-        add_properties_to_group(ifc_file, route_group, prop_dict)
-
-        # Create a shape builder
-        builder = ifcopenshell.util.shape_builder.ShapeBuilder(ifc_file)
+        if 'distance' in route and route['distance'] is not None:
+            prop_dict["TotalPathLength"] = float(route['distance'])
+        if 'distance_to_stair' in route and route['distance_to_stair'] is not None and route['distance_to_stair'] > 0:
+            prop_dict["DistanceToFirstStair"] = float(route['distance_to_stair'])
         
-        # Convert coordinates to the correct format
-        points = []
-        for p in route['optimal_path']:
-            x = float(p[0] * grid_size) + bbox['min_x']
-            y = float(p[1] * grid_size) + bbox['min_y']
-            floor_index = int(p[2])
-            z = floors[floor_index]['elevation'] + 0.5  # Add 0.5m to make it float above the floor
-            points.append((x, y, z))
+        # Add properties to the route group
+        add_properties_to_group(ifcfile, route_group, prop_dict)
 
-        logger.info(f"Creating polyline with {len(points)} points")
-        curve = builder.polyline(points)
-        
-        # Create a swept disk solid
-        radius = 0.1  # Base radius of 10cm
-        swept_curve = builder.create_swept_disk_solid(curve, radius)
-        
-        # Create IfcBuildingElementProxy for the route
-        ifc_route = ifc_file.create_entity("IfcBuildingElementProxy")
-        ifc_route.Name = f"EscapeRoute_{route['space_name']}"
+        if 'optimal_path' in route and route['optimal_path']:
+            # Create the escape route geometry
+            points = prepare_route_points(route['optimal_path'], grid_size, bbox, floors)
+            
+            route_segments = []
+            for i in range(len(points) - 1):
+                start_point = [float(coord) for coord in points[i]]
+                end_point = [float(coord) for coord in points[i + 1]]
+                segment = create_escape_route_segment(ifcfile, sb, body, storey, start_point, end_point, width=0.5, height=1.5, unit_scale=unit_scale)
+                route_segments.append(segment)
 
-        # Get or create the body context
-        body_context = ifcopenshell.util.representation.get_context(ifc_file, "Model", "Body", "MODEL_VIEW")
-        if not body_context:
-            model_context = ifcopenshell.api.run("context.add_context", ifc_file, context_type="Model")
-            body_context = ifcopenshell.api.run("context.add_context", ifc_file, 
-                                                context_type="Model", 
-                                                context_identifier="Body", 
-                                                target_view="MODEL_VIEW", 
-                                                parent=model_context)
-        
-        # Create shape representation
-        representation = builder.get_representation(body_context, swept_curve)
+            # Add route segments to route group
+            ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=route_segments)
 
-        if has_violations:
-            r, g, b = 1, 0.5, 0.5  # Red for routes with violations
+            # Set color (green for routes with no violations)
+            for segment in route_segments:
+                set_color(ifcfile, segment, (0.5, 1.0, 0.5))
         else:
-            r, g, b = 0.5, 1, 0.5  # Green for routes without violations
-        
-        # Create a style
-        style = ifcopenshell.api.run("style.add_style", ifc_file, name="My style")
-        # Give that style a surface shading colour
-        ifcopenshell.api.run("style.add_surface_style", ifc_file, style=style, ifc_class="IfcSurfaceStyleShading", attributes={
-                    "SurfaceColour": { "Name": None, "Red": r, "Green": g, "Blue": b }
-                })
-        # Assign the style to your geometry's representation (IfcShapeRepresentation)
-        ifcopenshell.api.run("style.assign_representation_styles", ifc_file, shape_representation=representation, styles=[style])
-        
-        # Assign shape to the product
-        ifcopenshell.api.run("geometry.assign_representation", ifc_file, product=ifc_route, representation=representation)
-
-        # Add route to route group
-        rel = ifc_file.create_entity("IfcRelAssignsToGroup", GlobalId=ifcopenshell.guid.new())
-        rel.RelatingGroup = route_group
-        rel.RelatedObjects = [ifc_route]
+            # Create red polygon for spaces without a route
+            if 'space_polygon' in route:
+                for sublist in route['space_polygon']:
+                    sublist.append(route['starting_elevation'])
+                polygon_points = prepare_route_points(route['space_polygon'], grid_size, bbox, floors)
+                polygon_segment = create_polygon_segment(ifcfile, sb, body, storey, polygon_points)
+                ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=[polygon_segment])
+                set_color(ifcfile, polygon_segment, (1.0, 0.5, 0.5))
 
         # Add route group to main escape routes group
-        rel = ifc_file.create_entity("IfcRelAssignsToGroup", GlobalId=ifcopenshell.guid.new())
-        rel.RelatingGroup = escape_routes_group
-        rel.RelatedObjects = [route_group]
+        ifcopenshell.api.run("group.assign_group", ifcfile, group=escape_routes_group, products=[route_group])
     
-    ifc_file.write(new_file)
+    ifcfile.write(new_file)
     return {"new_file_path": new_file}
 
-def create_group(ifc_file, name):
-    return ifcopenshell.api.run("group.add_group", ifc_file, name=name)
 
-def add_properties_to_group(ifc_file, group, properties):
-    property_set = ifcopenshell.api.run("pset.add_pset", ifc_file, product=group, name="EscapeRouteProperties")
+def create_polygon_segment(ifcfile, sb, body, storey, points):
+    # Create the polygon segment as an IfcBuildingElementProxy
+    polygon_segment = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name="SpacePolygon")
+
+    # Create profile
+    profile_points = [ifcfile.createIfcCartesianPoint(list(map(float, point))) for point in points]
+    polyline = ifcfile.createIfcPolyline(profile_points)
+    
+    # Create IfcArbitraryClosedProfileDef
+    profile = ifcfile.createIfcArbitraryClosedProfileDef("AREA", None, polyline)
+
+    # Create extrusion
+    extrusion_vector = ifcfile.createIfcDirection((0.0, 0.0, 1.0))
+    position = ifcfile.createIfcAxis2Placement3D(
+        ifcfile.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+        ifcfile.createIfcDirection((0.0, 0.0, 1.0)),
+        ifcfile.createIfcDirection((1.0, 0.0, 0.0))
+    )
+    extruded_solid = ifcfile.createIfcExtrudedAreaSolid(profile, position, extrusion_vector, 0.1)  # 0.1m height
+
+    # Get representation
+    representation = ifcfile.createIfcShapeRepresentation(
+        body, "Body", "SweptSolid", [extruded_solid]
+    )
+
+    # Assign representation
+    ifcopenshell.api.run("geometry.assign_representation", ifcfile, product=polygon_segment, representation=representation)
+
+    # Assign to storey
+    with suppress_stdout():
+        ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=polygon_segment)
+
+    # Set placement
+    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=polygon_segment)
+
+    return polygon_segment
+
+def set_color(ifcfile, product, color):
+    style = ifcopenshell.api.run("style.add_style", ifcfile, name=f"Color_{product.Name}")
+    ifcopenshell.api.run("style.add_surface_style", ifcfile, style=style, ifc_class="IfcSurfaceStyleShading", attributes={
+        "SurfaceColour": { "Name": None, "Red": color[0], "Green": color[1], "Blue": color[2] }
+    })
+    ifcopenshell.api.run("style.assign_representation_styles", ifcfile, shape_representation=product.Representation.Representations[0], styles=[style])
+
+
+def prepare_route_points(optimal_path, grid_size, bbox, floors):
+    for p in optimal_path:
+        if p[2] > len(floors):
+            logger.debug(p[2])
+            logger.debug(int(p[2]))
+            logger.debug(len(floors))
+    return [
+        (float(p[0] * grid_size) + bbox['min_x'],
+         float(p[1] * grid_size) + bbox['min_y'],
+         float(floors[int(p[2])]['elevation']) + 0.1)
+        for p in optimal_path
+    ]
+
+def add_properties_to_group(ifcfile, group, properties):
+    property_set = ifcopenshell.api.run("pset.add_pset", ifcfile, product=group, name="EscapeRouteProperties")
     for name, value in properties.items():
-        if name and value:
-            ifcopenshell.api.run("pset.edit_pset", ifc_file, pset=property_set, properties={name: value})
+        ifcopenshell.api.run("pset.edit_pset", ifcfile, pset=property_set, properties={name: str(value)})
+
+def create_site(ifc_file, project):
+    site = ifc_file.create_entity("IfcSite", GlobalId=ifcopenshell.guid.new(), Name="Site")
+    ifc_file.create_entity("IfcRelAggregates", GlobalId=ifcopenshell.guid.new(), 
+                           RelatingObject=project, RelatedObjects=[site])
+    return site
+
+def create_building(ifc_file, site):
+    building = ifc_file.create_entity("IfcBuilding", GlobalId=ifcopenshell.guid.new(), Name="Building")
+    ifc_file.create_entity("IfcRelAggregates", GlobalId=ifcopenshell.guid.new(), 
+                           RelatingObject=site, RelatedObjects=[building])
+    return building
+
+def prepare_route_properties(route):
+    prop_dict = {
+        "RoomName": route['space_name'],
+        "TotalPathLength": route['distance']
+    }
+    if route['distance_to_stair'] > 0:
+        prop_dict["DistanceToFirstStair"] = route['distance_to_stair']
+    
+    for violation_type, violations in route['violations'].items():
+        if violations:
+            prop_dict[f"{violation_type.capitalize()}Violations"] = ", ".join(violations)
+    
+    return prop_dict
+
+def assign_color_to_element(ifc_file, element, color):
+    rgb = ifc_file.createIfcColourRgb(None, *color)
+    color_style = ifc_file.createIfcSurfaceStyleRendering(rgb, 0.0, None, None, None, None, None, None, "FLAT")
+    surface_style = ifc_file.createIfcSurfaceStyle(None, "BOTH", [color_style])
+    presentation_style_assignment = ifc_file.createIfcPresentationStyleAssignment([surface_style])
+    styled_item = ifc_file.createIfcStyledItem(element.Representation.Representations[0].Items[0], [presentation_style_assignment], None)
+    return styled_item
+
+@contextmanager
+def suppress_stdout():
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:  
+            yield
+        finally:
+            sys.stdout = old_stdout

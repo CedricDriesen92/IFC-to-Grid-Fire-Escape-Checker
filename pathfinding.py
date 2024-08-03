@@ -391,7 +391,9 @@ class Pathfinder:
                     'optimal_path': optimal_path,
                     'distance': max_distance * self.grid_size,
                     'distance_to_stair': distance_to_stair * self.grid_size if distance_to_stair > 0 else -1,
-                    'space_name': space['name']
+                    'space_name': space['name'],
+                    'space_polygon': space['polygon'],
+                    'starting_elevation': point[2]
                 }
             else:
                 result = {
@@ -400,8 +402,11 @@ class Pathfinder:
                     'optimal_path': None,
                     'distance': None,
                     'distance_to_stair': None,
-                    'space_name': space['name']
+                    'space_name': space['name'],
+                    'space_polygon': space['polygon'],
+                    'starting_elevation': point[2]
                 }
+                #logger.debug(f"space polygon: {space['polygon']}")
 
             #logger.debug(f"Escape route calculation result for space {space['name']}: {result}")
             return result
