@@ -5,6 +5,7 @@ import ifcopenshell.util.placement
 import ifcopenshell.util.representation
 import ifcopenshell.util.shape_builder
 import ifcopenshell.api
+import ifcopenshell.file
 import bpy
 import uuid
 import math
@@ -447,55 +448,105 @@ def process_ifc_file(file_path: str, grid_size: float = 0.1) -> Dict[str, Any]:
     processor = IFCProcessor(file_path, grid_size)
     return processor.process()
 
-def create_escape_route_segment(ifcfile, sb, body, storey, start_point, end_point, width=0.4, height=1.5, unit_scale=1.0):
+def create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.4, height=1.5, unit_scale=1.0):
+    width = width / unit_scale
+    height = height / unit_scale
+
     # Create the escape route segment as an IfcBuildingElementProxy
-    width = width/unit_scale
-    height = height/unit_scale
     escape_route_segment = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name="EscapeRouteSegment")
 
-    # Calculate direction and length
-    direction = mathutils.Vector(end_point) - mathutils.Vector(start_point)
-    length = direction.length / unit_scale
+    # Calculate offset points for left and right curves
+    left_points = []
+    right_points = []
+    for i in range(len(points)):
+        if i == 0:
+            dx = points[1][0] - points[0][0]
+            dy = points[1][1] - points[0][1]
+        elif i == len(points) - 1:
+            dx = points[-1][0] - points[-2][0]
+            dy = points[-1][1] - points[-2][1]
+        else:
+            dx1 = points[i][0] - points[i-1][0]
+            dy1 = points[i][1] - points[i-1][1]
+            dx2 = points[i+1][0] - points[i][0]
+            dy2 = points[i+1][1] - points[i][1]
+            dx = (dx1 + dx2) / 2
+            dy = (dy1 + dy2) / 2
 
-    # Create profile (rectangle)
-    profile_points = [
-        (0.0, -width/2), (0.0, width/2),
-        (float(length), width/2), (float(length), -width/2), (0.0, -width/2)
-    ]
-    profile_points = [ifcfile.createIfcCartesianPoint(list(map(float, point))) for point in profile_points]
-    polyline = ifcfile.createIfcPolyline(profile_points)
-    
-    # Create IfcArbitraryClosedProfileDef
-    profile = ifcfile.createIfcArbitraryClosedProfileDef("AREA", None, polyline)
+        length = math.sqrt(dx*dx + dy*dy)
+        dx /= length
+        dy /= length
 
-    # Create extrusion
-    extrusion_vector = ifcfile.createIfcDirection((0.0, 0.0, 1.0))
-    position = ifcfile.createIfcAxis2Placement3D(
-        ifcfile.createIfcCartesianPoint((0.0, 0.0, 0.0)),
-        ifcfile.createIfcDirection((0.0, 0.0, 1.0)),
-        ifcfile.createIfcDirection((1.0, 0.0, 0.0))
+        perpx = -dy
+        perpy = dx
+
+        left_points.append((
+            points[i][0] + perpx * width/2,
+            points[i][1] + perpy * width/2,
+            points[i][2]
+        ))
+        right_points.append((
+            points[i][0] - perpx * width/2,
+            points[i][1] - perpy * width/2,
+            points[i][2]
+        ))
+
+    # Create vertices for the 3D polygon
+    vertices = []
+    for i in range(len(left_points)):
+        vertices.append(left_points[i])
+        vertices.append((left_points[i][0], left_points[i][1], left_points[i][2] + height))
+        vertices.append(right_points[i])
+        vertices.append((right_points[i][0], right_points[i][1], right_points[i][2] + height))
+
+    # Create edges for the 3D polygon
+    edges = []
+    n = len(left_points)
+    for i in range(0, 4*n-4, 4):
+        # Horizontal edges
+        edges.extend([(i, i+4), (i+1, i+5), (i+2, i+6), (i+3, i+7)])
+        # Vertical edges
+        edges.extend([(i, i+1), (i+2, i+3)])
+        # Cross edges for the sides
+        edges.extend([(i, i+2), (i+1, i+3)])
+
+    # Add the last vertical and cross edges
+    edges.extend([(4*n-4, 4*n-3), (4*n-2, 4*n-1), (4*n-4, 4*n-2), (4*n-3, 4*n-1)])
+
+    # Create faces for the 3D polygon
+    faces = []
+    for i in range(0, 4*n-4, 4):
+        # Left side face
+        faces.append([i, i+4, i+5, i+1])
+        # Right side face
+        faces.append([i+2, i+3, i+7, i+6])
+        # Bottom face
+        faces.append([i, i+2, i+6, i+4])
+        # Top face
+        faces.append([i+1, i+5, i+7, i+3])
+
+    # Add the front and back faces
+    faces.append([0, 1, 3, 2])
+    faces.append([4*n-4, 4*n-2, 4*n-1, 4*n-3])
+
+    # Create mesh representation
+    representation = ifcopenshell.api.run(
+        "geometry.add_mesh_representation",
+        ifcfile,
+        context=body,
+        vertices=[vertices],
+        edges=[edges],
+        faces=[faces]
     )
-    extruded_solid = ifcfile.createIfcExtrudedAreaSolid(profile, position, extrusion_vector, float(height))
-
-    # Get representation
-    representation = sb.get_representation(body, extruded_solid)
 
     # Assign representation
     ifcopenshell.api.run("geometry.assign_representation", ifcfile, product=escape_route_segment, representation=representation)
 
     # Assign to storey
-    with suppress_stdout():
-        ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=escape_route_segment)
+    ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=escape_route_segment)
 
     # Set placement
     ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=escape_route_segment)
-
-    # Rotate and translate to correct position
-    rotation = direction.to_track_quat('X', 'Z')
-    translation = mathutils.Vector(start_point)
-    
-    matrix = mathutils.Matrix.Translation(translation) @ rotation.to_matrix().to_4x4()
-    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=escape_route_segment, matrix=matrix)
 
     return escape_route_segment
 
@@ -555,6 +606,19 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
         if 'distance_to_stair' in route and route['distance_to_stair'] is not None and route['distance_to_stair'] > 0:
             prop_dict["DistanceToFirstStair"] = float(route['distance_to_stair'])
         
+        violations = route['violations']
+        has_violations = False
+        # Add route properties
+        if violations['general']:
+            prop_dict.update({"General violations": violations['general']})
+            has_violations = True
+        if violations['daytime']:
+            prop_dict.update({"Daytime violations": violations['daytime']})
+            has_violations = True
+        if violations['nighttime']:
+            prop_dict.update({"Nighttime violations": violations['nighttime']})
+            has_violations = True
+        
         # Add properties to the route group
         add_properties_to_group(ifcfile, route_group, prop_dict)
 
@@ -562,18 +626,16 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
             # Create the escape route geometry
             points = prepare_route_points(route['optimal_path'], grid_size, bbox, floors)
             
-            route_segments = []
-            for i in range(len(points) - 1):
-                start_point = [float(coord) for coord in points[i]]
-                end_point = [float(coord) for coord in points[i + 1]]
-                segment = create_escape_route_segment(ifcfile, sb, body, storey, start_point, end_point, width=0.5, height=1.5, unit_scale=unit_scale)
-                route_segments.append(segment)
+            # Create a single segment for the entire route
+            segment = create_escape_route_segment(ifcfile, sb, body, storey, points)
 
             # Add route segments to route group
-            ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=route_segments)
+            ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=[segment])
 
-            # Set color (green for routes with no violations)
-            for segment in route_segments:
+            # Set color (green for routes with no violations, red for with)
+            if has_violations:
+                set_color(ifcfile, segment, (1.0, 0.5, 0.5))
+            else:
                 set_color(ifcfile, segment, (0.5, 1.0, 0.5))
         else:
             # Create red polygon for spaces without a route
@@ -638,11 +700,6 @@ def set_color(ifcfile, product, color):
 
 
 def prepare_route_points(optimal_path, grid_size, bbox, floors):
-    for p in optimal_path:
-        if p[2] > len(floors):
-            logger.debug(p[2])
-            logger.debug(int(p[2]))
-            logger.debug(len(floors))
     return [
         (float(p[0] * grid_size) + bbox['min_x'],
          float(p[1] * grid_size) + bbox['min_y'],
