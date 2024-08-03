@@ -449,6 +449,7 @@ def process_ifc_file(file_path: str, grid_size: float = 0.1) -> Dict[str, Any]:
     return processor.process()
 
 def create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.4, height=1.5, unit_scale=1.0):
+    unit_scale = 1
     width = width / unit_scale
     height = height / unit_scale
 
@@ -456,6 +457,7 @@ def create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.4, he
     escape_route_segment = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name="EscapeRouteSegment")
 
     # Calculate offset points for left and right curves
+    height_above_floor = 0.05/unit_scale
     left_points = []
     right_points = []
     for i in range(len(points)):
@@ -483,12 +485,12 @@ def create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.4, he
         left_points.append((
             points[i][0] + perpx * width/2,
             points[i][1] + perpy * width/2,
-            points[i][2]
+            points[i][2] + height_above_floor
         ))
         right_points.append((
             points[i][0] - perpx * width/2,
             points[i][1] - perpy * width/2,
-            points[i][2]
+            points[i][2] + height_above_floor
         ))
 
     # Create vertices for the 3D polygon
@@ -627,7 +629,7 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
             points = prepare_route_points(route['optimal_path'], grid_size, bbox, floors)
             
             # Create a single segment for the entire route
-            segment = create_escape_route_segment(ifcfile, sb, body, storey, points)
+            segment = create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.7, height=1.5, unit_scale=unit_scale)
 
             # Add route segments to route group
             ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=[segment])
