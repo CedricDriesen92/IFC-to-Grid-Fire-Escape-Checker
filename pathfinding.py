@@ -385,10 +385,14 @@ class Pathfinder:
                     distance_to_stair = current_distance_to_stair
 
             if furthest_point and optimal_exit:
+                grid_type = []
+                for point in optimal_path:
+                    grid_type.append(self.grids[point[2]][point[0]][point[1]])
                 result = {
                     'furthest_point': furthest_point,
                     'optimal_exit': optimal_exit,
                     'optimal_path': optimal_path,
+                    'grid_type': grid_type, 
                     'distance': max_distance * self.grid_size,
                     'distance_to_stair': distance_to_stair * self.grid_size if distance_to_stair > 0 else -1,
                     'space_name': space['name'],
@@ -400,6 +404,7 @@ class Pathfinder:
                     'furthest_point': None,
                     'optimal_exit': None,
                     'optimal_path': None,
+                    'path_info': None,
                     'distance': None,
                     'distance_to_stair': None,
                     'space_name': space['name'],

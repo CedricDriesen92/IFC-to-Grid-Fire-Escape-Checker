@@ -447,20 +447,27 @@ class IFCProcessor:
 def process_ifc_file(file_path: str, grid_size: float = 0.1) -> Dict[str, Any]:
     processor = IFCProcessor(file_path, grid_size)
     return processor.process()
-
-def create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.4, height=1.5, unit_scale=1.0):
+    
+def create_escape_route_segment(ifcfile, sb, body, storey, points, grid_type, width=0.8, height=1.5, plan_width=0.8, unit_scale=1.0, space_name=""):
     unit_scale = 1
     width = width / unit_scale
     height = height / unit_scale
+    plan_width = plan_width / unit_scale
+    plan_height = 0.01 / unit_scale  # 1cm height for plan view
 
-    # Create the escape route segment as an IfcBuildingElementProxy
-    escape_route_segment = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name="EscapeRouteSegment")
+    # Create two separate IfcBuildingElementProxy elements
+    escape_route_3d = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name=f"EscapeRoute3D_{space_name}")
+    escape_route_plan = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name=f"EscapeRoutePlan_{space_name}")
 
     # Calculate offset points for left and right curves
-    height_above_floor = 0.05/unit_scale
     left_points = []
     right_points = []
+    plan_left_points = []
+    plan_right_points = []
+    
     for i in range(len(points)):
+        #if path_info[i]['space'] and path_info[i]['space'] not in passed_spaces:
+        #    passed_spaces.append(path_info[i]['space'])
         if i == 0:
             dx = points[1][0] - points[0][0]
             dy = points[1][1] - points[0][1]
@@ -482,57 +489,67 @@ def create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.4, he
         perpx = -dy
         perpy = dx
 
+        # Adjust width and height based on path_info
+        current_width = width
+        current_height = height
+        current_plan_width = plan_width
+        
+        if grid_type[i] == 'door':
+            current_width *= 0.6  # Reduce width at doors
+            current_plan_width *= 1
+        elif grid_type[i] == 'stair':
+            current_height *= 0.5  # Reduce height at stairs
+
         left_points.append((
-            points[i][0] + perpx * width/2,
-            points[i][1] + perpy * width/2,
-            points[i][2] + height_above_floor
+            points[i][0] + perpx * current_width/2,
+            points[i][1] + perpy * current_width/2,
+            points[i][2]
         ))
         right_points.append((
-            points[i][0] - perpx * width/2,
-            points[i][1] - perpy * width/2,
-            points[i][2] + height_above_floor
+            points[i][0] - perpx * current_width/2,
+            points[i][1] - perpy * current_width/2,
+            points[i][2]
+        ))
+        plan_left_points.append((
+            points[i][0] + perpx * current_plan_width/2,
+            points[i][1] + perpy * current_plan_width/2,
+            points[i][2]
+        ))
+        plan_right_points.append((
+            points[i][0] - perpx * current_plan_width/2,
+            points[i][1] - perpy * current_plan_width/2,
+            points[i][2]
         ))
 
     # Create vertices for the 3D polygon
     vertices = []
     for i in range(len(left_points)):
         vertices.append(left_points[i])
-        vertices.append((left_points[i][0], left_points[i][1], left_points[i][2] + height))
+        vertices.append((left_points[i][0], left_points[i][1], left_points[i][2] + current_height))
         vertices.append(right_points[i])
-        vertices.append((right_points[i][0], right_points[i][1], right_points[i][2] + height))
+        vertices.append((right_points[i][0], right_points[i][1], right_points[i][2] + current_height))
 
     # Create edges for the 3D polygon
     edges = []
     n = len(left_points)
     for i in range(0, 4*n-4, 4):
-        # Horizontal edges
         edges.extend([(i, i+4), (i+1, i+5), (i+2, i+6), (i+3, i+7)])
-        # Vertical edges
         edges.extend([(i, i+1), (i+2, i+3)])
-        # Cross edges for the sides
         edges.extend([(i, i+2), (i+1, i+3)])
-
-    # Add the last vertical and cross edges
     edges.extend([(4*n-4, 4*n-3), (4*n-2, 4*n-1), (4*n-4, 4*n-2), (4*n-3, 4*n-1)])
 
     # Create faces for the 3D polygon
     faces = []
     for i in range(0, 4*n-4, 4):
-        # Left side face
         faces.append([i, i+4, i+5, i+1])
-        # Right side face
         faces.append([i+2, i+3, i+7, i+6])
-        # Bottom face
         faces.append([i, i+2, i+6, i+4])
-        # Top face
         faces.append([i+1, i+5, i+7, i+3])
-
-    # Add the front and back faces
     faces.append([0, 1, 3, 2])
     faces.append([4*n-4, 4*n-2, 4*n-1, 4*n-3])
 
-    # Create mesh representation
-    representation = ifcopenshell.api.run(
+    # Create mesh representation for 3D geometry
+    representation_3d = ifcopenshell.api.run(
         "geometry.add_mesh_representation",
         ifcfile,
         context=body,
@@ -541,16 +558,50 @@ def create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.4, he
         faces=[faces]
     )
 
-    # Assign representation
-    ifcopenshell.api.run("geometry.assign_representation", ifcfile, product=escape_route_segment, representation=representation)
+    # Create vertices for the plan view polygon
+    plan_vertices = []
+    for i in range(len(plan_left_points)):
+        plan_vertices.append(plan_left_points[i])
+        plan_vertices.append((plan_left_points[i][0], plan_left_points[i][1], plan_left_points[i][2] + plan_height))
+        plan_vertices.append(plan_right_points[i])
+        plan_vertices.append((plan_right_points[i][0], plan_right_points[i][1], plan_right_points[i][2] + plan_height))
+
+    # Create edges and faces for the plan view polygon (similar to 3D polygon)
+    plan_edges = []
+    plan_faces = []
+    for i in range(0, 4*n-4, 4):
+        plan_edges.extend([(i, i+4), (i+1, i+5), (i+2, i+6), (i+3, i+7)])
+        plan_edges.extend([(i, i+1), (i+2, i+3)])
+        plan_edges.extend([(i, i+2), (i+1, i+3)])
+        plan_faces.append([i, i+4, i+6, i+2])
+        plan_faces.append([i+1, i+3, i+7, i+5])
+    plan_edges.extend([(4*n-4, 4*n-3), (4*n-2, 4*n-1), (4*n-4, 4*n-2), (4*n-3, 4*n-1)])
+    plan_faces.append([0, 1, 3, 2])
+    plan_faces.append([4*n-4, 4*n-2, 4*n-1, 4*n-3])
+
+    # Create mesh representation for plan view geometry
+    representation_plan = ifcopenshell.api.run(
+        "geometry.add_mesh_representation",
+        ifcfile,
+        context=body,
+        vertices=[plan_vertices],
+        edges=[plan_edges],
+        faces=[plan_faces]
+    )
+
+    # Assign representations
+    ifcopenshell.api.run("geometry.assign_representation", ifcfile, product=escape_route_3d, representation=representation_3d)
+    ifcopenshell.api.run("geometry.assign_representation", ifcfile, product=escape_route_plan, representation=representation_plan)
 
     # Assign to storey
-    ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=escape_route_segment)
+    ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=escape_route_3d)
+    ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=escape_route_plan)
 
     # Set placement
-    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=escape_route_segment)
+    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=escape_route_3d)
+    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=escape_route_plan)
 
-    return escape_route_segment
+    return escape_route_3d, escape_route_plan
 
 def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, floors):
     ifcfile = ifcopenshell.open(original_file)
@@ -561,6 +612,7 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
 
     
     logger.debug(f"Detected unit scale: {unit_scale}")
+    unit_scale = 1
     
     # Get or create necessary IFC elements
     project = ifcfile.by_type("IfcProject")[0]
@@ -593,12 +645,32 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
     # Create IfcGroup for all escape routes
     escape_routes_group = ifcfile.create_entity("IfcGroup", Name="EscapeRoutes")
 
+    # Create separate groups for 3D and plan representations
+    escape_routes_3d_group = ifcfile.create_entity("IfcGroup", Name="EscapeRoutes3D")
+    escape_routes_plan_group = ifcfile.create_entity("IfcGroup", Name="EscapeRoutesPlan")
+
+    # Assign 3D and plan groups to the main escape routes group
+    ifcopenshell.api.run("group.assign_group", ifcfile, group=escape_routes_group, products=[escape_routes_3d_group, escape_routes_plan_group])
+
+
+    # Create floor groups for 3D and plan
+    floor_groups_3d = {}
+    floor_groups_plan = {}
+    for floor_index in range(len(floors)):
+        floor_group_3d = ifcfile.create_entity("IfcGroup", Name=f"EscapeRoutes3D_Floor_{floor_index}")
+        floor_group_plan = ifcfile.create_entity("IfcGroup", Name=f"EscapeRoutesPlan_Floor_{floor_index}")
+        ifcopenshell.api.run("group.assign_group", ifcfile, group=escape_routes_3d_group, products=[floor_group_3d])
+        ifcopenshell.api.run("group.assign_group", ifcfile, group=escape_routes_plan_group, products=[floor_group_plan])
+        floor_groups_3d[floor_index] = floor_group_3d
+        floor_groups_plan[floor_index] = floor_group_plan
+
     for route in routes:
         logger.info(f"Processing route for space: {route['space_name']}")
         
-        # Create IfcGroup for the route
+        # Create IfcGroup for the specific route
         route_group = ifcfile.create_entity("IfcGroup", Name=f"EscapeRoute_{route['space_name']}")
-        
+        ifcopenshell.api.run("group.assign_group", ifcfile, group=escape_routes_group, products=[route_group])
+
         # Prepare route properties
         prop_dict = {
             "RoomName": route['space_name']
@@ -620,48 +692,77 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
         if violations['nighttime']:
             prop_dict.update({"Nighttime violations": violations['nighttime']})
             has_violations = True
-        
-        # Add properties to the route group
-        add_properties_to_group(ifcfile, route_group, prop_dict)
 
         if 'optimal_path' in route and route['optimal_path']:
-            # Create the escape route geometry
-            points = prepare_route_points(route['optimal_path'], grid_size, bbox, floors)
-            
-            # Create a single segment for the entire route
-            segment = create_escape_route_segment(ifcfile, sb, body, storey, points, width=0.7, height=1.5, unit_scale=unit_scale)
+            # Group points by floor
+            points_by_floor = {}
+            prev_floor = None
+            prev_point = None
+            for point in route['optimal_path']:
+                floor_index = int(point[2])
+                # Initialize the list for this floor if it doesn't exist
+                if floor_index not in points_by_floor:
+                    points_by_floor[floor_index] = []
+                
+                # If we're changing floors, add the connection points
+                if prev_floor is not None and floor_index != prev_floor:
+                    if prev_floor not in points_by_floor:
+                        points_by_floor[prev_floor] = []
+                    points_by_floor[prev_floor].append(point)
+                    points_by_floor[floor_index].append(prev_point)
+                
+                # Add the current point to the current floor
+                points_by_floor[floor_index].append(point)
+                
+                prev_floor = floor_index
+                prev_point = point
 
-            # Add route segments to route group
-            ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=[segment])
+            # Process each floor segment
+            for floor_index, floor_points in points_by_floor.items():
+                points = prepare_route_points(floor_points, grid_size, bbox, floors)
+                
+                # Create separate 3D and plan segments for this floor segment
+                segment_3d, segment_plan = create_escape_route_segment(ifcfile, sb, body, storey, points, route['grid_type'], width=0.7, height=1.5, unit_scale=unit_scale, space_name=route['space_name'])
 
-            # Set color (green for routes with no violations, red for with)
-            if has_violations:
-                set_color(ifcfile, segment, (1.0, 0.5, 0.5))
-            else:
-                set_color(ifcfile, segment, (0.5, 1.0, 0.5))
+                # Add properties to both 3D and plan segments
+                add_properties_to_element(ifcfile, segment_3d, prop_dict)
+                add_properties_to_element(ifcfile, segment_plan, prop_dict)
+
+                # Add route segments to respective groups
+                ifcopenshell.api.run("group.assign_group", ifcfile, group=floor_groups_3d[floor_index], products=[segment_3d])
+                ifcopenshell.api.run("group.assign_group", ifcfile, group=floor_groups_plan[floor_index], products=[segment_plan])
+                ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=[segment_3d, segment_plan])
+
+                # Set color (green for routes with no violations, red for with)
+                if has_violations:
+                    set_color(ifcfile, segment_3d, (1.0, 0.5, 0.5))
+                    set_color(ifcfile, segment_plan, (1.0, 0.5, 0.5))
+                else:
+                    set_color(ifcfile, segment_3d, (0.5, 1.0, 0.5))
+                    set_color(ifcfile, segment_plan, (0.5, 1.0, 0.5))
+
         else:
             # Create red polygon for spaces without a route
-            if 'space_polygon' in route:
+            if 'space_polygon' in route and False:
                 for sublist in route['space_polygon']:
                     sublist.append(route['starting_elevation'])
                 polygon_points = prepare_route_points(route['space_polygon'], grid_size, bbox, floors)
-                polygon_segment = create_polygon_segment(ifcfile, sb, body, storey, polygon_points)
+                polygon_segment = create_polygon_segment(ifcfile, sb, body, storey, polygon_points, float(floors[int(polygon_points[0][2])]['elevation']) + 0.1)
+                add_properties_to_element(ifcfile, polygon_segment, prop_dict)
                 ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=[polygon_segment])
+                ifcopenshell.api.run("group.assign_group", ifcfile, group=floor_groups_3d[int(polygon_points[0][2])], products=[polygon_segment])
                 set_color(ifcfile, polygon_segment, (1.0, 0.5, 0.5))
 
-        # Add route group to main escape routes group
-        ifcopenshell.api.run("group.assign_group", ifcfile, group=escape_routes_group, products=[route_group])
-    
     ifcfile.write(new_file)
     return {"new_file_path": new_file}
 
 
-def create_polygon_segment(ifcfile, sb, body, storey, points):
+def create_polygon_segment(ifcfile, sb, body, storey, points, elevation):
     # Create the polygon segment as an IfcBuildingElementProxy
     polygon_segment = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name="SpacePolygon")
 
     # Create profile
-    profile_points = [ifcfile.createIfcCartesianPoint(list(map(float, point))) for point in points]
+    profile_points = [ifcfile.createIfcCartesianPoint(list(map(float, point[:2]))) for point in points]
     polyline = ifcfile.createIfcPolyline(profile_points)
     
     # Create IfcArbitraryClosedProfileDef
@@ -670,11 +771,11 @@ def create_polygon_segment(ifcfile, sb, body, storey, points):
     # Create extrusion
     extrusion_vector = ifcfile.createIfcDirection((0.0, 0.0, 1.0))
     position = ifcfile.createIfcAxis2Placement3D(
-        ifcfile.createIfcCartesianPoint((0.0, 0.0, 0.0)),
+        ifcfile.createIfcCartesianPoint((0.0, 0.0, points[0][2])),
         ifcfile.createIfcDirection((0.0, 0.0, 1.0)),
         ifcfile.createIfcDirection((1.0, 0.0, 0.0))
     )
-    extruded_solid = ifcfile.createIfcExtrudedAreaSolid(profile, position, extrusion_vector, 0.1)  # 0.1m height
+    extruded_solid = ifcfile.createIfcExtrudedAreaSolid(profile, position, extrusion_vector, 1.0)  # 1.0m height
 
     # Get representation
     representation = ifcfile.createIfcShapeRepresentation(
@@ -711,6 +812,11 @@ def prepare_route_points(optimal_path, grid_size, bbox, floors):
 
 def add_properties_to_group(ifcfile, group, properties):
     property_set = ifcopenshell.api.run("pset.add_pset", ifcfile, product=group, name="EscapeRouteProperties")
+    for name, value in properties.items():
+        ifcopenshell.api.run("pset.edit_pset", ifcfile, pset=property_set, properties={name: str(value)})
+
+def add_properties_to_element(ifcfile, element, properties):
+    property_set = ifcopenshell.api.run("pset.add_pset", ifcfile, product=element, name="EscapeRouteProperties")
     for name, value in properties.items():
         ifcopenshell.api.run("pset.edit_pset", ifcfile, pset=property_set, properties={name: str(value)})
 
