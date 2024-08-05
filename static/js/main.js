@@ -1467,9 +1467,9 @@ async function updateIfcWithRoutes() {
     if (isIFC) {
         // If the original upload was an IFC file
         ifcFile = file;
-    } else if (originalGridData.original_ifc_filename) {
+//    } else if (originalGridData.original_ifc_filename) {
         // If a JSON was uploaded with a linked IFC file
-        ifcFile = await fetchLinkedIFCFile(originalGridData.original_ifc_filename);
+//        ifcFile = await fetchLinkedIFCFile(originalGridData.original_ifc_filename);
     } else {
         // If no IFC file is linked, use the uploaded one
         const fileInput = document.getElementById('ifc-file-input');

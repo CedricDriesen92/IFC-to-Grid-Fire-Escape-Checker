@@ -212,7 +212,7 @@ class IFCProcessor:
         # Sort floors by elevation
         floors_ifc = sorted(floors_ifc, key=lambda x: x['elevation'])
         #floor_elevations = [floor['elevation'] for floor in floors_ifc]
-        logger.debug(floors_ifc)
+        #logger.debug(floors_ifc)
         
         unit_scale = 1
         if not floor_elevations:
@@ -223,7 +223,7 @@ class IFCProcessor:
             logger.warning("Floor elevations inconsistent with bounding box, rescaling")
             unit_scale = ifcopenshell.util.unit.calculate_unit_scale(self.ifc_file)#, unit_type="si_meters")
         floor_elevations = [elev * unit_scale for elev in floor_elevations]
-        logger.debug(floor_elevations)
+        #logger.debug(floor_elevations)
         floors = []
         for i, elevation in enumerate(floor_elevations):
             next_elevation = floor_elevations[i + 1] if i < len(floor_elevations) - 1 else bbox['max_z']
@@ -704,7 +704,7 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
             has_violations = True
         logger.info(f"Floors: {floors}")
         if 'optimal_path' in route and route['optimal_path']:
-            logger.info(f"Optimal path found: {route['optimal_path']}")
+            #logger.info(f"Optimal path found: {route['optimal_path']}")
             # Group points by floor
             points_by_floor = {}
             prev_floor = None
@@ -728,15 +728,15 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
                 prev_floor = floor_index
                 prev_point = point
                 
-            logger.warning(f"Points by floor: {points_by_floor}")
+            #logger.warning(f"Points by floor: {points_by_floor}")
 
             # Process each floor segment
             for floor_index, floor_points in points_by_floor.items():
                 floor_data = floors[floor_index]
                 storey = ifcfile.by_guid(floor_data['guid'])
                 elevation = floor_data['elevation']
-                logger.info(f"Processing floor: {floor_index}")
-                logger.info(f"Storey: {storey}")
+                #logger.info(f"Processing floor: {floor_index}")
+                #logger.info(f"Storey: {storey}")
                 if not storey:
                     logger.warning(f"Storey not found for floor {floor_index}, using default storey")
                     storey = ifcfile.by_type("IfcBuildingStorey")[0]
