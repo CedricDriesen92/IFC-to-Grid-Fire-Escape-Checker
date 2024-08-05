@@ -164,7 +164,7 @@ class IFCProcessor:
         except Exception as e:
             raise RuntimeError(f"Error loading IFC file: {str(e)}")
 
-    def calculate_bounding_box_and_floors(self) -> Tuple[Dict[str, float], List[Dict[str, float]]]:
+    def calculate_bounding_box_and_floors(self) -> Tuple[Dict[str, float], List[Dict]]:
         settings = ifcopenshell.geom.settings()
         settings.set(settings.USE_WORLD_COORDS, True)
 
@@ -201,30 +201,42 @@ class IFCProcessor:
             if size > max_reasonable_size:
                 logger.warning(f"Unreasonably large bounding box size for {axis}-axis: {size} meters")
 
+        floors_ifc = []
         for storey in self.ifc_file.by_type("IfcBuildingStorey"):
             if storey.Elevation is not None:
+                floors_ifc.append({'elevation': float(storey.Elevation), 'guid': storey.GlobalId})
                 floor_elevations.add(float(storey.Elevation))
 
         floor_elevations = sorted(list(floor_elevations))
 
-        if not floor_elevations or min(floor_elevations) < bbox['min_z'] or max(floor_elevations) > bbox['max_z']:
-            logger.warning("Floor elevations inconsistent with bounding box, creating default floors")
+        # Sort floors by elevation
+        floors_ifc = sorted(floors_ifc, key=lambda x: x['elevation'])
+        #floor_elevations = [floor['elevation'] for floor in floors_ifc]
+        logger.debug(floors_ifc)
+        
+        unit_scale = 1
+        if not floor_elevations:
+            logger.warning("Floors not found, creating new ones:")
             num_floors = max(1, int((bbox['max_z'] - bbox['min_z']) / 3))  # Assume 3m floor height
             floor_elevations = np.linspace(bbox['min_z'], bbox['max_z'], num_floors + 1)[:-1]
-
+        if min(floor_elevations) < bbox['min_z'] or max(floor_elevations) > bbox['max_z']:
+            logger.warning("Floor elevations inconsistent with bounding box, rescaling")
+            unit_scale = ifcopenshell.util.unit.calculate_unit_scale(self.ifc_file)#, unit_type="si_meters")
+        floor_elevations = [elev * unit_scale for elev in floor_elevations]
+        logger.debug(floor_elevations)
         floors = []
         for i, elevation in enumerate(floor_elevations):
             next_elevation = floor_elevations[i + 1] if i < len(floor_elevations) - 1 else bbox['max_z']
             height = next_elevation - elevation
             if height > 1.6 and height < 10:
-                floors.append({'elevation': elevation, 'height': height})
+                floors.append({'elevation': elevation, 'height': height, 'guid': floors_ifc[i]['guid']})
 
         if not floors:
             logger.warning("No valid floors found, creating a single floor based on bounding box")
             floors = [{'elevation': bbox['min_z'], 'height': bbox['max_z'] - bbox['min_z']}]
 
-        logger.info(f"Created {len(floors)} floors")
-        logger.info(floors)
+        logger.debug(f"Created {len(floors)} floors")
+        logger.debug(floors)
         return bbox, floors
 
     def create_grids(self) -> List[np.ndarray]:
@@ -448,7 +460,7 @@ def process_ifc_file(file_path: str, grid_size: float = 0.1) -> Dict[str, Any]:
     processor = IFCProcessor(file_path, grid_size)
     return processor.process()
     
-def create_escape_route_segment(ifcfile, sb, body, storey, points, grid_type, width=0.8, height=1.5, plan_width=0.8, unit_scale=1.0, space_name=""):
+def create_escape_route_segment(ifcfile, sb, body, storey, points, grid_type, width=0.8, height=1.5, plan_width=0.8, unit_scale=1.0, space_name="", floor_number = 0):
     unit_scale = 1
     width = width / unit_scale
     height = height / unit_scale
@@ -456,8 +468,8 @@ def create_escape_route_segment(ifcfile, sb, body, storey, points, grid_type, wi
     plan_height = 0.01 / unit_scale  # 1cm height for plan view
 
     # Create two separate IfcBuildingElementProxy elements
-    escape_route_3d = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name=f"EscapeRoute3D_{space_name}")
-    escape_route_plan = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name=f"EscapeRoutePlan_{space_name}")
+    escape_route_3d = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name=f"EscapeRoute3D_{space_name}_floor_{floor_number}")
+    escape_route_plan = ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingElementProxy", name=f"EscapeRoutePlan_{space_name}_floor_{floor_number}")
 
     # Calculate offset points for left and right curves
     left_points = []
@@ -496,9 +508,10 @@ def create_escape_route_segment(ifcfile, sb, body, storey, points, grid_type, wi
         
         if grid_type[i] == 'door':
             current_width *= 0.6  # Reduce width at doors
-            current_plan_width *= 1
+            current_plan_width *= 0.6
         elif grid_type[i] == 'stair':
-            current_height *= 0.5  # Reduce height at stairs
+            current_width *= 0.6
+            current_plan_width *= 0.6
 
         left_points.append((
             points[i][0] + perpx * current_width/2,
@@ -594,8 +607,8 @@ def create_escape_route_segment(ifcfile, sb, body, storey, points, grid_type, wi
     ifcopenshell.api.run("geometry.assign_representation", ifcfile, product=escape_route_plan, representation=representation_plan)
 
     # Assign to storey
-    ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=escape_route_3d)
-    ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=escape_route_plan)
+    ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, products=[escape_route_3d])
+    ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, products=[escape_route_plan])
 
     # Set placement
     ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=escape_route_3d)
@@ -621,13 +634,10 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
     
     # Ensure site and building are in the project structure
     with suppress_stdout():
-        ifcopenshell.api.run("aggregate.assign_object", ifcfile, relating_object=project, product=site)
-        ifcopenshell.api.run("aggregate.assign_object", ifcfile, relating_object=site, product=building)
+        ifcopenshell.api.run("aggregate.assign_object", ifcfile, relating_object=project, products=[site])
+        ifcopenshell.api.run("aggregate.assign_object", ifcfile, relating_object=site, products=[building])
 
-    # Get or create a storey
-    storey = ifcfile.by_type("IfcBuildingStorey")[0] if ifcfile.by_type("IfcBuildingStorey") else ifcopenshell.api.run("root.create_entity", ifcfile, ifc_class="IfcBuildingStorey")
-    with suppress_stdout():
-        ifcopenshell.api.run("aggregate.assign_object", ifcfile, relating_object=building, product=storey)
+    storeys_by_guid = {storey.GlobalId: storey for storey in ifcfile.by_type("IfcBuildingStorey")}
 
     # Get context
     body = ifcopenshell.util.representation.get_context(ifcfile, "Model", "Body", "MODEL_VIEW")
@@ -692,8 +702,9 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
         if violations['nighttime']:
             prop_dict.update({"Nighttime violations": violations['nighttime']})
             has_violations = True
-
+        logger.info(f"Floors: {floors}")
         if 'optimal_path' in route and route['optimal_path']:
+            logger.info(f"Optimal path found: {route['optimal_path']}")
             # Group points by floor
             points_by_floor = {}
             prev_floor = None
@@ -716,13 +727,28 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
                 
                 prev_floor = floor_index
                 prev_point = point
+                
+            logger.warning(f"Points by floor: {points_by_floor}")
 
             # Process each floor segment
             for floor_index, floor_points in points_by_floor.items():
-                points = prepare_route_points(floor_points, grid_size, bbox, floors)
+                floor_data = floors[floor_index]
+                storey = ifcfile.by_guid(floor_data['guid'])
+                elevation = floor_data['elevation']
+                logger.info(f"Processing floor: {floor_index}")
+                logger.info(f"Storey: {storey}")
+                if not storey:
+                    logger.warning(f"Storey not found for floor {floor_index}, using default storey")
+                    storey = ifcfile.by_type("IfcBuildingStorey")[0]
+
+                points = prepare_route_points(floor_points, grid_size, bbox, elevation, floors)
                 
                 # Create separate 3D and plan segments for this floor segment
-                segment_3d, segment_plan = create_escape_route_segment(ifcfile, sb, body, storey, points, route['grid_type'], width=0.7, height=1.5, unit_scale=unit_scale, space_name=route['space_name'])
+                segment_3d, segment_plan = create_escape_route_segment(
+                    ifcfile, sb, body, storey, points, route['grid_type'],
+                    width=0.7, height=1.5, plan_width=0.8, unit_scale=unit_scale, space_name=route['space_name'],
+                    floor_number=floor_index
+                )
 
                 # Add properties to both 3D and plan segments
                 add_properties_to_element(ifcfile, segment_3d, prop_dict)
@@ -740,18 +766,6 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
                 else:
                     set_color(ifcfile, segment_3d, (0.5, 1.0, 0.5))
                     set_color(ifcfile, segment_plan, (0.5, 1.0, 0.5))
-
-        else:
-            # Create red polygon for spaces without a route
-            if 'space_polygon' in route and False:
-                for sublist in route['space_polygon']:
-                    sublist.append(route['starting_elevation'])
-                polygon_points = prepare_route_points(route['space_polygon'], grid_size, bbox, floors)
-                polygon_segment = create_polygon_segment(ifcfile, sb, body, storey, polygon_points, float(floors[int(polygon_points[0][2])]['elevation']) + 0.1)
-                add_properties_to_element(ifcfile, polygon_segment, prop_dict)
-                ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=[polygon_segment])
-                ifcopenshell.api.run("group.assign_group", ifcfile, group=floor_groups_3d[int(polygon_points[0][2])], products=[polygon_segment])
-                set_color(ifcfile, polygon_segment, (1.0, 0.5, 0.5))
 
     ifcfile.write(new_file)
     return {"new_file_path": new_file}
@@ -783,14 +797,14 @@ def create_polygon_segment(ifcfile, sb, body, storey, points, elevation):
     )
 
     # Assign representation
-    ifcopenshell.api.run("geometry.assign_representation", ifcfile, product=polygon_segment, representation=representation)
+    ifcopenshell.api.run("geometry.assign_representation", ifcfile, products=[polygon_segment], representation=representation)
 
     # Assign to storey
     with suppress_stdout():
-        ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, product=polygon_segment)
+        ifcopenshell.api.run("spatial.assign_container", ifcfile, relating_structure=storey, products=[polygon_segment])
 
     # Set placement
-    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, product=polygon_segment)
+    ifcopenshell.api.run("geometry.edit_object_placement", ifcfile, products=[polygon_segment])
 
     return polygon_segment
 
@@ -802,7 +816,7 @@ def set_color(ifcfile, product, color):
     ifcopenshell.api.run("style.assign_representation_styles", ifcfile, shape_representation=product.Representation.Representations[0], styles=[style])
 
 
-def prepare_route_points(optimal_path, grid_size, bbox, floors):
+def prepare_route_points(optimal_path, grid_size, bbox, elevation, floors):
     return [
         (float(p[0] * grid_size) + bbox['min_x'],
          float(p[1] * grid_size) + bbox['min_y'],
@@ -811,7 +825,7 @@ def prepare_route_points(optimal_path, grid_size, bbox, floors):
     ]
 
 def add_properties_to_group(ifcfile, group, properties):
-    property_set = ifcopenshell.api.run("pset.add_pset", ifcfile, product=group, name="EscapeRouteProperties")
+    property_set = ifcopenshell.api.run("pset.add_pset", ifcfile, products=[group], name="EscapeRouteProperties")
     for name, value in properties.items():
         ifcopenshell.api.run("pset.edit_pset", ifcfile, pset=property_set, properties={name: str(value)})
 
