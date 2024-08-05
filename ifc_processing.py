@@ -44,6 +44,7 @@ class IFCProcessor:
     def process(self) -> Dict[str, Any]:
         try:
             self.ifc_file = self.load_ifc_file()
+            logger.info("IFC file loaded")
             self.bbox, self.floors = self.calculate_bounding_box_and_floors()
             self.determine_unit_size()
             self.grids = self.create_grids()
@@ -176,7 +177,16 @@ class IFCProcessor:
         bbox_items = []
         for type in WALL_TYPES:
             bbox_items += self.ifc_file.by_type(type)
+
+        logger.info(f"Number of bbox items to check: {len(bbox_items)}")
+        curnum = 0
+        totnum = 0
         for item in bbox_items:
+            curnum += 1
+            if curnum == 100:
+                totnum += curnum
+                curnum = 0
+                logger.info(f"Done {totnum} out of {len(bbox_items)}.")
             if item.Representation:
                 try:
                     shape = ifcopenshell.geom.create_shape(settings, item)

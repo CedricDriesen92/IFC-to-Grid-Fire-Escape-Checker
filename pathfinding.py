@@ -32,7 +32,7 @@ class Pathfinder:
         for floor, grid in enumerate(self.buffered_grids):
             for x in range(len(grid)):
                 for y in range(len(grid[0])):
-                    if grid[x][y] not in ['wall', 'walla']:
+                    if grid[x][y] not in ['wall', 'walla', 'empty']:
                         node = (x, y, floor)
                         G.add_node(node, floor=floor, type=grid[x][y])
                         
@@ -44,7 +44,7 @@ class Pathfinder:
                         for dx, dy in neighbors:
                             n_x, n_y = x + dx, y + dy
                             if 0 <= n_x < len(grid) and 0 <= n_y < len(grid[0]):
-                                if grid[n_x][n_y] not in ['wall', 'walla']:
+                                if grid[n_x][n_y] not in ['wall', 'walla', 'empty']:
                                     neighbor = (n_x, n_y, floor)
                                     weight = self._get_edge_weight(grid[x][y], neighbor=grid[n_x][n_y], is_diagonal=(dx != 0 and dy != 0))
                                     G.add_edge(node, neighbor, weight=weight)
@@ -285,9 +285,9 @@ class Pathfinder:
         for x, y in door_group:
             for dx, dy in directions:
                 nx, ny = x + dx, y + dy
-                if 0 <= nx < rows and 0 <= ny < cols and floor[nx][ny] not in ['wall', 'door']:
+                if 0 <= nx < rows and 0 <= ny < cols and floor[nx][ny] not in ['wall', 'door', 'empty']:
                     while 0 <= nx < rows and 0 <= ny < cols:
-                        if floor[nx][ny] in ['wall', 'door']:
+                        if floor[nx][ny] in ['wall', 'door', 'empty']:
                             break
                         if nx == 0 or nx == rows - 1 or ny == 0 or ny == cols - 1:
                             return True
