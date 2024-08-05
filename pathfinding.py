@@ -55,7 +55,7 @@ class Pathfinder:
 
     def _get_edge_weight(self, cell_type: str, neighbor: str = None, is_diagonal: bool = False) -> float:
         if self.minimize_cost:
-            if neighbor and self != neighbor:
+            if neighbor and cell_type != neighbor:
                 weights = {
                     'empty': 1.0,
                     'floor': 1.0,
@@ -199,7 +199,7 @@ class Pathfinder:
         actual_horizontal_distance = horizontal_distance * self.grid_size
         if height_diff > actual_horizontal_distance:
             actual_horizontal_distance = height_diff #for angles that are too high assume 45 degree stairs
-        actual_distance = math.sqrt(height_diff**2 + (horizontal_distance * self.grid_size)**2)
+        actual_distance = math.sqrt(height_diff**2 + (horizontal_distance)**2)
         # Convert actual distance back to grid units
         grid_units_distance = actual_distance / self.grid_size
         #logger.debug(grid_units_distance)

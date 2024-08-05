@@ -208,7 +208,7 @@ class GridManager:
                                 volume = len(space['points']) * (self.grid_size ** 2)
                                 area = len(border) * self.grid_size
                                 #logger.debug(f"Space {space_id} - Volume: {volume}, Area: {area}")
-                                if volume > 1:
+                                if volume > 0.2:
                                     space['polygon'] = self._create_polygon(border)
                                     spaces.append(space)
 
