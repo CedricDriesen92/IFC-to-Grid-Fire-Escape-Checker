@@ -114,15 +114,16 @@ class Pathfinder:
         return visited
 
     def _connect_stairs(self, G: nx.Graph):
-        angle = 45
+        angle = 35
         stair_angle = angle  # 55 degree angle for stairs
-        num_directions = 16  # Number of directions to check
+        num_directions = 8  # Number of directions to check
         stair_groups = self._group_connected_stairs()
 
         for group_index, group in enumerate(stair_groups):
             floors = sorted(set(floor for _, _, floor in group))
             
             for i in range(len(floors) - 1):
+                stair_angle = angle  # start for every floor
                 lower_floor, upper_floor = floors[i], floors[i + 1]
                 lower_stairs = [pos for pos in group if pos[2] == lower_floor]
                 upper_stairs = [pos for pos in group if pos[2] == upper_floor]
@@ -139,16 +140,21 @@ class Pathfinder:
                     #print(f"Grid distance: {grid_distance}")
 
                     connections_made = 0
+                    connections_made_last = 25 # Wait X to find another connection
                     for start_x, start_y, _ in lower_stairs:
-                        for end_x, end_y, _ in upper_stairs:
-                            if self._check_stair_connection(start_x, start_y, lower_floor, end_x, end_y, upper_floor, horizontal_distance, num_directions):
-                                start_node = (start_x, start_y, lower_floor)
-                                end_node = (end_x, end_y, upper_floor)
-                                if start_node in G and end_node in G:
-                                    weight = self._calculate_stair_weight(start_node, end_node, grid_height)
-                                    #logger.debug(weight)
-                                    G.add_edge(start_node, end_node, weight=weight)
-                                    connections_made += 1
+                        connections_made_last += 1
+                        if connections_made_last > 25:
+                            for end_x, end_y, _ in upper_stairs:
+                                if self._check_stair_connection(start_x, start_y, lower_floor, end_x, end_y, upper_floor, horizontal_distance, num_directions):
+                                    start_node = (start_x, start_y, lower_floor)
+                                    end_node = (end_x, end_y, upper_floor)
+                                    if start_node in G and end_node in G:
+                                        connections_made_last = 0
+                                        weight = self._calculate_stair_weight(start_node, end_node, grid_height)
+                                        #logger.debug(weight)
+                                        G.add_edge(start_node, end_node, weight=weight)
+                                        connections_made += 1
+                                        break
                                     #print(f"Connected {start_node} to {end_node} with weight {weight}")
                             #else:
                             #    print(f"Failed to connect {(start_x, start_y, lower_floor)} to {(end_x, end_y, upper_floor)}")
@@ -285,9 +291,9 @@ class Pathfinder:
         for x, y in door_group:
             for dx, dy in directions:
                 nx, ny = x + dx, y + dy
-                if 0 <= nx < rows and 0 <= ny < cols and floor[nx][ny] not in ['wall', 'door', 'empty']:
+                if 0 <= nx < rows and 0 <= ny < cols and floor[nx][ny] not in ['wall', 'door']:
                     while 0 <= nx < rows and 0 <= ny < cols:
-                        if floor[nx][ny] in ['wall', 'door', 'empty']:
+                        if floor[nx][ny] in ['wall', 'door']:
                             break
                         if nx == 0 or nx == rows - 1 or ny == 0 or ny == cols - 1:
                             return True
@@ -310,6 +316,9 @@ class Pathfinder:
             invalid_goals = [node for node in goal_nodes if node not in self.graph]
             raise ValueError(f"The following goal nodes are not in the graph: {invalid_goals}")
         
+        # TESTING, ONLY DO LAST TWO FLOORS
+
+
         def heuristic(a, b):
             (x1, y1, z1) = a
             (x2, y2, z2) = b
@@ -346,7 +355,7 @@ class Pathfinder:
             distance_to_stair = -1
 
             for point in candidate_points:
-                if point not in self.graph:
+                if point not in self.graph or point[2] < len(self.grids)-200:
                     #logger.warning(f"Point {point} not in graph for space {space['name']}")
                     continue
 

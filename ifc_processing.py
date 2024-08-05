@@ -505,6 +505,8 @@ def create_escape_route_segment(ifcfile, sb, body, storey, points, grid_type, wi
             dy = (dy1 + dy2) / 2
 
         length = math.sqrt(dx*dx + dy*dy)
+        if length <= 0:
+            length = 1
         dx /= length
         dy /= length
 
