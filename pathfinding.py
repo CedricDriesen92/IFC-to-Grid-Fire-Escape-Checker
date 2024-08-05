@@ -11,7 +11,7 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 class Pathfinder:
-    def __init__(self, original_grids: List[List[List[str]]], buffered_grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = True):
+    def __init__(self, original_grids: List[List[List[str]]], buffered_grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = False):
         self.original_grids = original_grids
         self.buffered_grids = buffered_grids
         self.grids = buffered_grids
@@ -46,7 +46,7 @@ class Pathfinder:
                             if 0 <= n_x < len(grid) and 0 <= n_y < len(grid[0]):
                                 if grid[n_x][n_y] not in ['wall', 'walla']:
                                     neighbor = (n_x, n_y, floor)
-                                    weight = self._get_edge_weight(grid[x][y], neighbor=neighbor, is_diagonal=(dx != 0 and dy != 0))
+                                    weight = self._get_edge_weight(grid[x][y], neighbor=grid[n_x][n_y], is_diagonal=(dx != 0 and dy != 0))
                                     G.add_edge(node, neighbor, weight=weight)
         
         self._connect_stairs(G)
@@ -128,6 +128,7 @@ class Pathfinder:
                 upper_stairs = [pos for pos in group if pos[2] == upper_floor]
 
                 height_diff = self.floors[upper_floor]['elevation'] - self.floors[lower_floor]['elevation']
+                grid_height = height_diff * self.grid_size
                 iter_angle = stair_angle
                 while iter_angle <= 80:
                     horizontal_distance = height_diff / math.tan(math.radians(iter_angle))
@@ -144,7 +145,7 @@ class Pathfinder:
                                 start_node = (start_x, start_y, lower_floor)
                                 end_node = (end_x, end_y, upper_floor)
                                 if start_node in G and end_node in G:
-                                    weight = self._calculate_stair_weight(start_node, end_node, height_diff)
+                                    weight = self._calculate_stair_weight(start_node, end_node, grid_height)
                                     #logger.debug(weight)
                                     G.add_edge(start_node, end_node, weight=weight)
                                     connections_made += 1
@@ -199,11 +200,11 @@ class Pathfinder:
         actual_horizontal_distance = horizontal_distance * self.grid_size
         if height_diff > actual_horizontal_distance:
             actual_horizontal_distance = height_diff #for angles that are too high assume 45 degree stairs
-        actual_distance = math.sqrt(height_diff**2 + (horizontal_distance)**2)
+        actual_distance = math.sqrt(height_diff**2 + (actual_horizontal_distance)**2)
         # Convert actual distance back to grid units
         grid_units_distance = actual_distance / self.grid_size
         #logger.debug(grid_units_distance)
-        return self._get_edge_weight('stair') * grid_units_distance
+        return self._get_edge_weight(cell_type='stair', neighbor='stair') * grid_units_distance
 
     def _connect_stairs_fallback(self, G, lower_stairs, upper_stairs):
         for lower_x, lower_y, lower_floor in lower_stairs:
@@ -357,7 +358,6 @@ class Pathfinder:
                 for exit in exits:
                     exit = (exit[0], exit[1], exit[2])
                     if exit not in self.graph:
-                        #logger.warning(f"Exit {exit} not in graph")
                         continue
 
                     try:
@@ -383,7 +383,18 @@ class Pathfinder:
                     optimal_exit = best_exit
                     optimal_path = best_path
                     distance_to_stair = current_distance_to_stair
-
+                    # Calculate real distances based on actual geometric distances
+                    
+            real_max_distance = 0
+            real_distance_to_stair = -1
+            
+            if optimal_path:
+                real_max_distance = self._calculate_real_distance(optimal_path)
+                
+                stair_index = next((i for i, node in enumerate(optimal_path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), -1)
+                if stair_index != -1:
+                    real_distance_to_stair = self._calculate_real_distance(optimal_path[:stair_index+1])
+                    
             if furthest_point and optimal_exit:
                 grid_type = []
                 for point in optimal_path:
@@ -393,8 +404,8 @@ class Pathfinder:
                     'optimal_exit': optimal_exit,
                     'optimal_path': optimal_path,
                     'grid_type': grid_type, 
-                    'distance': max_distance * self.grid_size,
-                    'distance_to_stair': distance_to_stair * self.grid_size if distance_to_stair > 0 else -1,
+                    'distance': real_max_distance,
+                    'distance_to_stair': real_distance_to_stair if distance_to_stair > 0 else -1,
                     'space_name': space['name'],
                     'space_polygon': space['polygon'],
                     'starting_elevation': point[2]
@@ -419,7 +430,22 @@ class Pathfinder:
             logger.error(f"Error in calculate_escape_route for space {space['name']}: {str(e)}")
             logger.error(traceback.format_exc())
             raise
-
+        
+    def _calculate_real_distance(self, path: List[Tuple[int, int, int]]) -> float:
+        total_distance = 0
+        for i in range(len(path) - 1):
+            x1, y1, z1 = path[i]
+            x2, y2, z2 = path[i+1]
+            
+            # Calculate 3D Euclidean distance
+            dx = (x2 - x1) * self.grid_size
+            dy = (y2 - y1) * self.grid_size
+            dz = (self.floors[z2]['elevation'] - self.floors[z1]['elevation'])
+            
+            distance = math.sqrt(dx**2 + dy**2 + dz**2)
+            total_distance += distance
+        
+        return total_distance
     
     def _select_candidate_points(self, space: Dict[str, Any]) -> List[Tuple[int, int, int]]:
         points = np.array(space['points'])

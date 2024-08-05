@@ -221,7 +221,8 @@ def api_create_graph():
             data['grid_size'],
             data['floors'],
             data['bbox'],
-            data['allow_diagonal']
+            data['allow_diagonal'],
+            data['minimize_cost']
         )
         #if not graphs:
         #if hasGridChanged or not graphs:

@@ -702,7 +702,7 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
         if violations['nighttime']:
             prop_dict.update({"Nighttime violations": violations['nighttime']})
             has_violations = True
-        logger.info(f"Floors: {floors}")
+        #logger.info(f"Floors: {floors}")
         if 'optimal_path' in route and route['optimal_path']:
             #logger.info(f"Optimal path found: {route['optimal_path']}")
             # Group points by floor
