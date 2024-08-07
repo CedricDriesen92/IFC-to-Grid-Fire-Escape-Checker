@@ -178,12 +178,13 @@ class IFCProcessor:
         for type in WALL_TYPES:
             bbox_items += self.ifc_file.by_type(type)
 
+        bbox_items = list(set(bbox_items))
         logger.info(f"Number of bbox items to check: {len(bbox_items)}")
         curnum = 0
         totnum = 0
         for item in bbox_items:
             curnum += 1
-            if curnum == 100:
+            if curnum == 99:
                 totnum += curnum
                 curnum = 0
                 logger.info(f"Done {totnum} out of {len(bbox_items)}.")
