@@ -184,7 +184,7 @@ class IFCProcessor:
         totnum = 0
         for item in bbox_items:
             curnum += 1
-            if curnum == 99:
+            if curnum == 100:
                 totnum += curnum
                 curnum = 0
                 logger.info(f"Done {totnum} out of {len(bbox_items)}.")
@@ -234,6 +234,7 @@ class IFCProcessor:
             logger.warning("Floor elevations inconsistent with bounding box, rescaling")
             unit_scale = ifcopenshell.util.unit.calculate_unit_scale(self.ifc_file)#, unit_type="si_meters")
         floor_elevations = [elev * unit_scale for elev in floor_elevations]
+        self.unit_scale = unit_scale
         #logger.debug(floor_elevations)
         floors = []
         for i, elevation in enumerate(floor_elevations):
@@ -271,29 +272,40 @@ class IFCProcessor:
 
         elements = [element for element in self.ifc_file.by_type('IfcProduct') if element.is_a() in ALL_TYPES]
 
-        for element in elements:
+        for i, element in enumerate(elements):
+            if i%25 == 0:
+                print(f"Processing element {i} out of {len(elements)}.")
+            subelements = ifcopenshell.util.element.get_parts(element)
+            success = False
             if element.Representation:
                 try:
-                    self.process_single_element(element, settings)
+                    success = self.process_single_element(element, settings, self.get_element_type(element))
                 except Exception as e:
-                    logger.warning(f"Error processing element {element.id()}: {str(e)}")
+                    logger.warning(f"Error processing element {element[0]}: {str(e)}")
+            if (True) and (subelements and len(subelements) > 0):
+                for subelement in subelements:
+                    if subelement.Representation:
+                        try:
+                            success = self.process_single_element(subelement, settings, self.get_element_type(element))
+                        except Exception as e:
+                            logger.warning(f"Error processing element {subelement[0]}: {str(e)}")
 
-    def process_single_element(self, element: ifcopenshell.entity_instance, settings: ifcopenshell.geom.settings) -> None:
+    def process_single_element(self, element, settings, element_type) -> None:
         try:
             shape = ifcopenshell.geom.create_shape(settings, element)
             verts = shape.geometry.verts
             faces = shape.geometry.faces
         except RuntimeError as e:
-            logger.warning(f"Failed to process: {element.is_a()}, Error: {str(e)}")
-            return
+            #logger.warning(f"Failed to process: {element.is_a()} {element.id()}, Error: {str(e)}")
+            return False
 
-        element_type = self.get_element_type(element)
+        #element_type = self.get_element_type(element)
         if element_type is None:
-            return
+            return False
 
         if not verts:
             print(f"Warning: No vertices found for {element.is_a()} (ID: {element.id()}), faces: " + str(len(faces)))
-            return
+            return False
         #else:
         #    print(f"Vertices found for {element.is_a()} (ID: {element.id()}), faces: " + str(len(faces)))
 
@@ -303,8 +315,11 @@ class IFCProcessor:
         max_y = max(verts[i+1] for i in range(0, len(verts), 3))
         min_z = min(verts[i+2] for i in range(0, len(verts), 3))
         max_z = max(verts[i+2] for i in range(0, len(verts), 3))
-        if element.is_a() in FLOOR_TYPES or element.is_a() in STAIR_TYPES:
-            max_z += 1.5/self.unit_size # Extend the floors up so they get detected better
+        if element_type == 'floor' or element_type == 'stair':
+            if element_type == 'floor':
+                print(f"Floor {element[0]}: {min_z}, {max_z}; unit_size: {self.unit_size}")
+                min_z += 0.5/self.unit_size
+            max_z += 1.5/self.unit_size # Extend the floors/stairs up so they get detected better
 
         for floor_index, floor in enumerate(self.floors):
             if min_z < floor['elevation'] + 2/self.unit_size and max_z > floor['elevation'] + 0.1/self.unit_size:
@@ -324,6 +339,7 @@ class IFCProcessor:
                                     verts[faces[i+1]*3:faces[i+1]*3+3],
                                     verts[faces[i+2]*3:faces[i+2]*3+3]]
                         self.mark_cells(triangle, self.grids[floor_index], floor, element_type)
+        return True
 
     def mark_door(self, floor_index: int, min_x: float, min_y: float, max_x: float, max_y: float, floor: Dict[str, float]) -> None:
         start_x = (min_x - self.bbox['min_x']) / self.grid_size
@@ -346,17 +362,6 @@ class IFCProcessor:
             for y in range(start_y, end_y + 1):
                 self.grids[floor_index][x, y] = 'door'
 
-    def mark_stair(self, floor_index: int, min_x: float, min_y: float, max_x: float, max_y: float, stair: Dict[str, float]) -> None:
-        start_x = max(0, int((min_x - self.bbox['min_x']) / self.grid_size))
-        end_x = min(self.grids[floor_index].shape[0] - 1, int((max_x - self.bbox['min_x']) / self.grid_size))
-        start_y = max(0, int((min_y - self.bbox['min_y']) / self.grid_size))
-        end_y = min(self.grids[floor_index].shape[1] - 1, int((max_y - self.bbox['min_y']) / self.grid_size))
-
-        for x in range(start_x, end_x + 1):
-            for y in range(start_y, end_y + 1):
-                if self.grids[floor_index][x, y] not in ['door', 'wall']:
-                    self.grids[floor_index][x, y] = 'stair'
-
     def get_element_type(self, element: ifcopenshell.entity_instance) -> str:
         if element.is_a() in WALL_TYPES:
             return 'wall'
@@ -376,8 +381,13 @@ class IFCProcessor:
         max_y = max(p[1] for p in triangle)
         min_z = min(p[2] for p in triangle)
         max_z = max(p[2] for p in triangle)
+        
+        if element_type == 'floor' or element_type == 'stair':
+            if element_type == 'floor':
+                min_z += 0.3/self.unit_size
+            max_z += 1.5/self.unit_size # Extend the floors/stairs up so they get detected better
 
-        if element_type == 'stair' or (element_type == 'floor' and max_z < floor['elevation'] + 1) or (min_z < floor['elevation'] + floor['height'] and max_z > floor['elevation']):
+        if element_type == 'stair' or element_type == 'floor' or (min_z < floor['elevation'] + 2/self.unit_size and max_z > floor['elevation']):
             start_x = max(0, int((min_x - self.bbox['min_x']) / self.grid_size))
             end_x = min(grid.shape[0] - 1, int((max_x - self.bbox['min_x']) / self.grid_size))
             start_y = max(0, int((min_y - self.bbox['min_y']) / self.grid_size))

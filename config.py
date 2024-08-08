@@ -1,7 +1,7 @@
 import os
 
 # Flask settings
-DEBUG = True
+DEBUG = False
 SECRET_KEY = os.environ.get('SECRET_KEY') or 'you-will-never-guess'
 
 # File upload settings
