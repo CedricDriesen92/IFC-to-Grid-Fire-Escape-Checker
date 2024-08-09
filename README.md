@@ -1,4 +1,4 @@
-# Editeable-IFC-multilevel-A-Pathfinder
+# IFC-to-IFC-multilevel-A*-Pathfinder
 How to run: launch app.py!
 
 ![IFCoutput](https://github.com/user-attachments/assets/ffbaa049-91d3-4f99-a91b-a2b46688e471)
