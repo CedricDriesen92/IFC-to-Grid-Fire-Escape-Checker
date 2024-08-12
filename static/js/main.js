@@ -164,6 +164,7 @@ document.getElementById('find-path').addEventListener('click', findPath);
 document.getElementById('calculate-escape-routes').addEventListener('click', calculateEscapeRoutes);
 document.getElementById('export-grid').addEventListener('click', exportGrid);
 document.getElementById('update-ifc-button').addEventListener('click', updateIfcWithRoutes);
+document.getElementById('export-pdf-button').addEventListener('click', exportPdfReport);
 
 function initializeToolMenus() {
     const paintTool = document.getElementById('paint-tool');
@@ -342,6 +343,7 @@ function handleProcessedData(data) {
         document.getElementById('ifc-file-input').style.display = 'none';
     }
     document.getElementById('update-ifc-button').style.display = 'none';
+    document.getElementById('export-pdf-button').style.display = 'none';
 }
 
 async function initializeGrid() {
@@ -1442,6 +1444,7 @@ async function calculateEscapeRoutes() {
     }
 
     document.getElementById('update-ifc-button').style.display = 'block';
+    document.getElementById('export-pdf-button').style.display = 'block';
     hideProgress();
 
     // Display final results
@@ -1512,6 +1515,46 @@ async function updateIfcWithRoutes() {
         showError(`An error occurred while updating the IFC file: ${error.message}`);
     }
 }
+
+async function exportPdfReport() {
+    if (!foundEscapeRoutes) {
+        showError('Please calculate escape routes first.');
+        return;
+    }
+
+    try {
+        console.log(bufferedGridData.floors);
+        const response = await fetch('/api/generate-pdf-report', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                escape_routes: foundEscapeRoutes,
+                grid_size: bufferedGridData.grid_size,
+                floors: bufferedGridData.floors
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error('Network response was not ok');
+        }
+
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = 'escape_routes_report.pdf';
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+    } catch (error) {
+        console.error('Error:', error);
+        showError(`An error occurred while generating the PDF report: ${error.message}`);
+    }
+}
+
 // Helper function to fetch the linked IFC file
 async function fetchLinkedIFCFile(filename) {
     const response = await fetch(`/api/get-linked-ifc-file/${filename}`);
@@ -1757,7 +1800,7 @@ function handleWallBufferChange(e) {
 function updateFloorDisplay() {
     let currentElev = (Math.round(bufferedGridData.floors[currentFloor]['elevation'] * 100) / 100).toFixed(2);
     let currentHeight = (Math.round((bufferedGridData.floors[currentFloor]['elevation'] + bufferedGridData.floors[currentFloor]['height']) * 100) / 100).toFixed(2);
-    document.getElementById('current-floor').textContent = `Floor: ${currentFloor + 1} / ${bufferedGridData.grids.length}`;
+    document.getElementById('current-floor').textContent = `Floor ${bufferedGridData.floors[currentFloor]['name']}: ${currentFloor + 1} / ${bufferedGridData.grids.length}`;
     document.getElementById('current-floor-info').textContent = `Elevation: ${currentElev} m to ${currentHeight} m`;
 }
 

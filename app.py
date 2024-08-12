@@ -9,6 +9,12 @@ import json
 import webbrowser
 from threading import Timer
 
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+
 import logging
 import sys, traceback
 
@@ -333,7 +339,92 @@ def api_update_ifc_with_routes():
         logger.error(f"Error updating IFC with routes: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/generate-pdf-report', methods=['POST'])
+def generate_pdf_report():
+    data = request.json
+    escape_routes = data['escape_routes']
+    grid_size = data['grid_size']
+    floors = data['floors']
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    # Title
+    elements.append(Paragraph("Escape Routes Report", styles['Title']))
+    elements.append(Spacer(1, 12))
+
+    # Violations summary
+    elements.append(Paragraph("Routes with Violations:", styles['Heading2']))
+    for route in escape_routes:
+        if any(route['violations'].values()):
+            elements.append(Paragraph(f"Space: {route['space_name']}", styles['Heading3']))
+            for violation_type, violations in route['violations'].items():
+                if violations:
+                    elements.append(Paragraph(f"{violation_type.capitalize()}:", styles['Heading4']))
+                    for violation in violations:
+                        elements.append(Paragraph(f"- {violation}", styles['BodyText']))
+            elements.append(Spacer(1, 12))
+
+    # Table of all routes
+    elements.append(Paragraph("Overview of All Routes:", styles['Heading2']))
+    
+    for floor_index, floor in enumerate(floors):
+        elements.append(Paragraph(f"Floor {floor_index}/{len(floors)}: '{floor['name']}'", styles['Heading3']))
         
+        table_data = [["Space", "Total Length (m)", "Length to Stairs (m)", "Violations"]]
+        for route in escape_routes:
+            logger.debug(route['starting_elevation'])
+            if int(route['starting_elevation']) == floor_index:
+                total_length = route['distance'] if route['distance'] is not None else "N/A"
+                length_to_stairs = route['distance_to_stair'] if (route['distance_to_stair'] is not None and route['distance_to_stair'] > 0) else "N/A"
+                violations = ", ".join([v for vtype in route['violations'].values() for v in vtype]) if (route['violations'].items() is not None) else "None"
+                table_data.append([
+                    route['space_name'],
+                    f"{total_length:.2f}" if isinstance(total_length, float) else total_length,
+                    f"{length_to_stairs:.2f}" if isinstance(length_to_stairs, float) else length_to_stairs,
+                    violations
+                ])
+        
+        if len(table_data) > 1:
+            table = Table(table_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 14),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 12),
+                ('TOPPADDING', (0, 1), (-1, -1), 6),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+
+            # Color rows based on violations
+            for i, route in enumerate(escape_routes):
+                if route['starting_elevation'] == floor_index:
+                    if route['violations']['general'] or route['violations']['daytime']:
+                        table.setStyle(TableStyle([('BACKGROUND', (0, i+1), (-1, i+1), colors.pink)]))
+                    elif route['violations']['nighttime']:
+                        table.setStyle(TableStyle([('BACKGROUND', (0, i+1), (-1, i+1), colors.yellow)]))
+
+            elements.append(table)
+            elements.append(Spacer(1, 12))
+        else:
+            elements.append(Paragraph("No routes on this floor.", styles['BodyText']))
+            elements.append(Spacer(1, 12))
+
+    doc.build(elements)
+    buffer.seek(0)
+    
+    return send_file(buffer, as_attachment=True, download_name='escape_routes_report.pdf', mimetype='application/pdf')
         
 @app.route('/static/<path:path>')
 def send_static(path: str) -> Any:

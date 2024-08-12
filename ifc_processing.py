@@ -215,7 +215,7 @@ class IFCProcessor:
         floors_ifc = []
         for storey in self.ifc_file.by_type("IfcBuildingStorey"):
             if storey.Elevation is not None:
-                floors_ifc.append({'elevation': float(storey.Elevation), 'guid': storey.GlobalId})
+                floors_ifc.append({'elevation': float(storey.Elevation), 'guid': storey.GlobalId, 'name': storey.Name})
                 floor_elevations.add(float(storey.Elevation))
 
         floor_elevations = sorted(list(floor_elevations))
@@ -241,7 +241,7 @@ class IFCProcessor:
             next_elevation = floor_elevations[i + 1] if i < len(floor_elevations) - 1 else bbox['max_z']
             height = next_elevation - elevation
             if height > 1.6 and height < 10:
-                floors.append({'elevation': elevation, 'height': height, 'guid': floors_ifc[i]['guid']})
+                floors.append({'elevation': elevation, 'height': height, 'guid': floors_ifc[i]['guid'], 'name': floors_ifc[i]['name']})
 
         if not floors:
             logger.warning("No valid floors found, creating a single floor based on bounding box")
@@ -715,13 +715,16 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
         
         violations = route['violations']
         has_violations = False
+        has_violations_day_general = False
         # Add route properties
         if violations['general']:
             prop_dict.update({"General violations": violations['general']})
             has_violations = True
+            has_violations_day_general = True
         if violations['daytime']:
             prop_dict.update({"Daytime violations": violations['daytime']})
             has_violations = True
+            has_violations_day_general = True
         if violations['nighttime']:
             prop_dict.update({"Nighttime violations": violations['nighttime']})
             has_violations = True
@@ -782,10 +785,13 @@ def add_escape_routes_to_ifc(original_file, new_file, routes, grid_size, bbox, f
                 ifcopenshell.api.run("group.assign_group", ifcfile, group=floor_groups_plan[floor_index], products=[segment_plan])
                 ifcopenshell.api.run("group.assign_group", ifcfile, group=route_group, products=[segment_3d, segment_plan])
 
-                # Set color (green for routes with no violations, red for with)
-                if has_violations:
+                # Set color (green for routes with no violations, red for with, orange for only nighttime)
+                if has_violations and has_violations_day_general:
                     set_color(ifcfile, segment_3d, (1.0, 0.5, 0.5))
                     set_color(ifcfile, segment_plan, (1.0, 0.5, 0.5))
+                elif has_violations and not has_violations_day_general:
+                    set_color(ifcfile, segment_3d, (1.0, 0.7, 0.1))
+                    set_color(ifcfile, segment_plan, (1.0, 0.7, 0.1))
                 else:
                     set_color(ifcfile, segment_3d, (0.5, 1.0, 0.5))
                     set_color(ifcfile, segment_plan, (0.5, 1.0, 0.5))

@@ -353,8 +353,10 @@ class Pathfinder:
             optimal_exit = None
             optimal_path = None
             distance_to_stair = -1
-
+            cpoint = None
+            
             for point in candidate_points:
+                cpoint = point
                 if point not in self.graph or point[2] < len(self.grids)-200:
                     #logger.warning(f"Point {point} not in graph for space {space['name']}")
                     continue
@@ -417,7 +419,7 @@ class Pathfinder:
                     'distance_to_stair': real_distance_to_stair if distance_to_stair > 0 else -1,
                     'space_name': space['name'],
                     'space_polygon': space['polygon'],
-                    'starting_elevation': point[2]
+                    'starting_elevation': cpoint[2]
                 }
             else:
                 result = {
@@ -429,7 +431,7 @@ class Pathfinder:
                     'distance_to_stair': None,
                     'space_name': space['name'],
                     'space_polygon': space['polygon'],
-                    'starting_elevation': point[2]
+                    'starting_elevation': cpoint[2]
                 }
                 #logger.debug(f"space polygon: {space['polygon']}")
 
