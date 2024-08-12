@@ -288,7 +288,6 @@ function exportGrid() {
         floors: originalGridData.floors,
         bbox: originalGridData.bbox,
         unit_size: originalGridData.unit_size,
-        spaces: spacesData,
         original_ifc_filename: file ? file.name : null
     };
 
@@ -314,8 +313,6 @@ function handleProcessedData(data) {
     originalGridData = data;
     bufferedGridData = {...data};
     console.log(originalGridData.floors);
-    spacesData = data.spaces || [];
-    console.log('Loaded spaces data:', spacesData);
     
     if (typeof originalGridData.grid_size === 'number') {
         originalGridData.grid_size *= originalGridData.unit_size || 1;

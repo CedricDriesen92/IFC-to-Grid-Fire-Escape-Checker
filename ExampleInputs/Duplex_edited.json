@@ -33866,12 +33866,14 @@
     {
       "elevation": 0,
       "guid": "1xS3BCk291UvhgP2dvNMKI",
-      "height": 3.100000000000378
+      "height": 3.100000000000378,
+      "name": "Level 1"
     },
     {
       "elevation": 3.100000000000378,
       "guid": "1xS3BCk291UvhgP2dvNMQJ",
-      "height": 2.900000000000012
+      "height": 2.900000000000012,
+      "name": "Level 2"
     }
   ],
   "bbox": {
