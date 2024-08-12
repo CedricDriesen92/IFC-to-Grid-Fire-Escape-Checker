@@ -33884,5 +33884,6 @@
     "min_y": -17.900000000000016,
     "min_z": -1.25
   },
-  "unit_size": 1
+  "unit_size": 1,
+  "original_ifc_filename": "Duplex.ifc"
 }

@@ -1520,7 +1520,6 @@ async function exportPdfReport() {
     }
 
     try {
-        console.log(bufferedGridData.floors);
         const response = await fetch('/api/generate-pdf-report', {
             method: 'POST',
             headers: {
@@ -1529,7 +1528,8 @@ async function exportPdfReport() {
             body: JSON.stringify({
                 escape_routes: foundEscapeRoutes,
                 grid_size: bufferedGridData.grid_size,
-                floors: bufferedGridData.floors
+                floors: bufferedGridData.floors,
+                'filename': file.name
             })
         });
 
@@ -1542,7 +1542,7 @@ async function exportPdfReport() {
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        a.download = 'escape_routes_report.pdf';
+        a.download = file.name.split(".")[0] + '_escape_routes_report.pdf';
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);

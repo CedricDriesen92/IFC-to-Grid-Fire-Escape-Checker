@@ -62,11 +62,11 @@ def process_file() -> tuple[Dict[str, Any], int]:
         origin_filepath = filepath
         file.save(filepath)
         
-        if filename.lower().endswith('.json'):
-            ifc_filepath = filename.replace('_edited.json', '.ifc')
+        if file.filename.lower().endswith('.json'):
+            ifc_filepath = file.filename.replace('_edited.json', '.ifc')
             return jsonify({'output': 'Reset...'}), 200
         else:
-            ifc_filepath = filename
+            ifc_filepath = file.filename
             grid_size = float(request.form.get('grid_size', 0.1))
             try:
                 result = process_ifc_file(filepath, grid_size)
@@ -346,6 +346,7 @@ def generate_pdf_report():
     escape_routes = data['escape_routes']
     grid_size = data['grid_size']
     floors = data['floors']
+    filename = data['filename'].split(".", -1)[0]
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
@@ -354,6 +355,7 @@ def generate_pdf_report():
 
     # Title
     elements.append(Paragraph("Escape Routes Report", styles['Title']))
+    elements.append(Paragraph(f"File: <u>{filename}.ifc</u>", styles['Heading2']))
     elements.append(Spacer(1, 12))
 
     # Violations summary
@@ -372,7 +374,7 @@ def generate_pdf_report():
     elements.append(Paragraph("Overview of All Routes:", styles['Heading2']))
     
     for floor_index, floor in enumerate(floors):
-        elements.append(Paragraph(f"Floor {floor_index}/{len(floors)}: '{floor['name']}'", styles['Heading3']))
+        elements.append(Paragraph(f"Floor {floor_index+1}/{len(floors)}: '{floor['name']}'", styles['Heading3']))
         
         table_data = [["Space", "Total Length (m)", "Length to Stairs (m)", "Violations"]]
         for route in escape_routes:
@@ -424,7 +426,7 @@ def generate_pdf_report():
     doc.build(elements)
     buffer.seek(0)
     
-    return send_file(buffer, as_attachment=True, download_name='escape_routes_report.pdf', mimetype='application/pdf')
+    return send_file(buffer, as_attachment=True, download_name=f"{filename}_report.pdf", mimetype='application/pdf')
         
 @app.route('/static/<path:path>')
 def send_static(path: str) -> Any:
