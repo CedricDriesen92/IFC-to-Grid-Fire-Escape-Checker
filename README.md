@@ -14,10 +14,12 @@ The program works in three steps:
 ![Escape routes](https://github.com/user-attachments/assets/127e4bb1-058d-4f4e-826f-797ae1bf8f08)
 4) (Optional) The result can also be re-exported into the IFC as 3D geometry of the routes, split up by floor, with the metadata attached.
 ![IFC export visualized](https://github.com/user-attachments/assets/f31ebd99-1876-4905-acac-0d0333cb5664)
+5) (Optional) The result can also be exported as a PDF report.
+![SampleReport](https://github.com/user-attachments/assets/a63c63a0-4384-4d81-bc65-c12518cb17ec)
 
 To do:
 - Make able to call via command line, easy since everything is already automatic.
-- Automatically create a validation report, incl figures/spaces that violate which rules/whatever is necessary for the designer.
+- Include floor plans in the report.
 - Try again to align spaces with the IfcSpace, but their geometry doesn't seem to line up correctly... Maybe mix calculating the spaces myself and extracting the IFC properties of its closest matching IfcSpace?
 - Check for a visibility graph version, since for large IFC files with many rooms a grid pathfinder (esp with many floors) can be slow. Maybe a hybrid approach where the grid inside a space is transformed into a visibility graph, connected via doors, to be explored.
 - Try to do something similar for point clouds / Gaussian Splats / NERF... But maybe less ambitious.
