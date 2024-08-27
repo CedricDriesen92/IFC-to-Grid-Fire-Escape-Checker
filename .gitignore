@@ -10,3 +10,4 @@ IFCwithRoutes/O-S1-BWK-BIM architectural - BIM bouwkundig_with_routes.ifc
 /ExampleInputs/00630 Eurostaete Eindhoven_20240813112841/
 /ExampleInputs/IFC_Schependomlaan_geo.ifc
 IfcConvert.exe
+cloc-2.02.exe
