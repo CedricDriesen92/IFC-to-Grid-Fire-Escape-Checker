@@ -659,8 +659,8 @@ function renderSpaces(ctx) {
                 ctx.strokeText(`Total: ${route.distance.toFixed(2)}m`, textX, textY);
                 ctx.fillText(`Total: ${route.distance.toFixed(2)}m`, textX, textY);
                 if(route.distance_to_stair >= 0){
-                    ctx.strokeText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 25);
-                    ctx.fillText(`To Stair: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 25);
+                    ctx.strokeText(`To Stairway: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 25);
+                    ctx.fillText(`To Stairway: ${route.distance_to_stair.toFixed(2)}m`, textX, textY + 25);
                 }
             }
             else if(route){
@@ -1397,7 +1397,8 @@ async function calculateEscapeRoutes() {
                     },
                     body: JSON.stringify({
                         space: space,
-                        exits: goals.map(goal => [goal.row, goal.col, goal.floor])
+                        exits: goals.map(goal => [goal.row, goal.col, goal.floor]),
+                        spaces: spacesData
                     })
                 });
 

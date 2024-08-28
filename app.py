@@ -280,8 +280,9 @@ def api_calculate_escape_route():
         
         space = data['space']
         exits = data['exits']
+        spaces = data['spaces']
         
-        result = pathfinder.calculate_escape_route(space, exits)
+        result = pathfinder.calculate_escape_route(space, exits, spaces)
         violations = check_escape_route_rules(result, pathfinder.grid_size)
         result['violations'] = violations
         

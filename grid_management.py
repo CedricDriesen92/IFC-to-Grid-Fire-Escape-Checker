@@ -210,6 +210,8 @@ class GridManager:
                                 #logger.debug(f"Space {space_id} - Volume: {volume}, Area: {area}")
                                 if volume > 0.2:
                                     space['polygon'] = self._create_polygon(border)
+                                    space['area'] = volume  # Calculate area
+                                    space['is_stairway'] = self._check_if_stairway(grid, border)  # Check for stairway
                                     spaces.append(space)
 
             #logger.debug(f"Detected {len(spaces)} spaces")
@@ -218,6 +220,14 @@ class GridManager:
             logger.error(f"Error in detect_spaces: {str(e)}", exc_info=True)
             raise ValueError(f"Error detecting spaces: {str(e)}")
 
+    def _check_if_stairway(self, grid: np.ndarray, points: List[Tuple[int, int]]) -> bool:
+        """Check if a space touches a stair element."""
+        for x, y in points:
+            for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < grid.shape[0] and 0 <= ny < grid.shape[1] and grid[nx, ny] == 'stair':
+                    return True
+        return False
 
     def _flood_fill(self, grid, visited, i, j, floor_index, space_id, include_empty_tiles):
         stack = [(i, j)]

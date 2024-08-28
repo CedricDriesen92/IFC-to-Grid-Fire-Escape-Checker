@@ -322,7 +322,7 @@ class Pathfinder:
         def heuristic(a, b):
             (x1, y1, z1) = a
             (x2, y2, z2) = b
-            return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 + (abs(z1 - z2)*2) ** 2
+            return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 + (abs(z1 - z2)*3) ** 2
 
         path = None
         shortest_length = float('inf')
@@ -342,7 +342,7 @@ class Pathfinder:
         path_lengths = self._calculate_path_lengths(path)
         return path, path_lengths
     
-    def calculate_escape_route(self, space: Dict[str, Any], exits: List[Tuple[int, int, int]]) -> Dict[str, Any]:
+    def calculate_escape_route(self, space: Dict[str, Any], exits: List[Tuple[int, int, int]], spaces: List[Dict[str, Any]]) -> Dict[str, Any]:
         try:
             #logger.debug(f"Calculating escape route for space: {space['name']}")
             candidate_points = self._select_candidate_points(space)
@@ -375,7 +375,12 @@ class Pathfinder:
                         path = nx.astar_path(self.graph, point, exit, heuristic=self._heuristic, weight='weight')
                         distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(len(path)-1))
                         
-                        stair_index = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), -1)
+                        #stair_index = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), -1)
+                        
+                        # Find index of first node that belongs to a stairway space
+                        stair_index = next((i for i, node in enumerate(path) 
+                                            if self._is_node_in_stairway_space(node, spaces)), -1)  # Pass spaces here
+                        
                         if stair_index != -1:
                             stair_distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(stair_index))
                             current_distance_to_stair = stair_distance if current_distance_to_stair == -1 else min(current_distance_to_stair, stair_distance)
@@ -441,7 +446,14 @@ class Pathfinder:
             logger.error(f"Error in calculate_escape_route for space {space['name']}: {str(e)}")
             logger.error(traceback.format_exc())
             raise
-        
+    
+    def _is_node_in_stairway_space(self, node: Tuple[int, int, int], spaces: List[Dict[str, Any]]) -> bool:
+        """Check if a node belongs to a space marked as a stairway."""
+        for space in spaces:
+            if space['is_stairway'] and node[0] in [p[0] for p in space['points']] and node[1] in [p[1] for p in space['points']] and node[2] == space['floor']:
+                return True
+        return False
+    
     def _calculate_real_distance(self, path: List[Tuple[int, int, int]]) -> float:
         total_distance = 0
         for i in range(len(path) - 1):
@@ -513,7 +525,7 @@ def calculate_escape_route(grids: List[List[List[str]]], grid_size: float, floor
         
         pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox, allow_diagonal)
         pathfinder.create_graph()
-        result = pathfinder.calculate_escape_route(space, exits)
+        result = pathfinder.calculate_escape_route(space, exits, spaces)
         
         logger.debug(f"Escape route calculation result: {result}")
         return result
@@ -532,7 +544,7 @@ def calculate_escape_routes(grids: List[List[List[str]]], grid_size: float, floo
         
         results = []
         for space in spaces:
-            result = pathfinder.calculate_escape_route(space, exits)
+            result = pathfinder.calculate_escape_route(space, exits, spaces)
             violations = check_escape_route_rules(result, grid_size)
             result['violations'] = violations
             results.append(result)
