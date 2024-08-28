@@ -322,7 +322,7 @@ class Pathfinder:
         def heuristic(a, b):
             (x1, y1, z1) = a
             (x2, y2, z2) = b
-            return ((x1 - x2) ** 2 + (y1 - y2) ** 2 + (abs(z1 - z2)*4)**2) ** 0.5
+            return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 + (abs(z1 - z2)*2) ** 2
 
         path = None
         shortest_length = float('inf')
