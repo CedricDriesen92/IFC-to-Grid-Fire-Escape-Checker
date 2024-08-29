@@ -453,10 +453,6 @@ function renderGrid(grid) {
         let spacesOverMaxDistance = [];
         let spacesWithoutExits = [];
         foundEscapeRoutes.forEach(route => {
-            let prevPoint = null;
-            //console.log(route);
-            //console.log(route['distance']);
-            //console.log(route.distance);
             let hasViolations = false;
             if (route.distance){
                 totalLength = Math.max(totalLength, route.distance);
@@ -470,28 +466,42 @@ function renderGrid(grid) {
                     spacesOverMaxDistance.push(route.space_name);
                     outputText.innerHTML.concat("\nSpace: ", route.space_name, "\nDistance to closest escape is too long: ", route.distance);
                 }
-                ctx.strokeStyle = isOverMaxDistance ? 'rgba(255, 0, 0, 0.8)' : 'rgba(0, 255, 0, 0.8)';
-                ctx.setLineDash([]);
-                ctx.lineWidth = 4;
                 if (route && route.violations && (route.violations['daytime'].length > 0 || route.violations['nighttime'].length > 0)) {
                     hasViolations = true;
-                    ctx.setLineDash([5,5]);
-                    ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
+                    ctx.setLineDash([5, 5]);
+                } else {
+                    ctx.setLineDash([]);
                 }
-                ctx.beginPath();
-                route.optimal_path.forEach((point, index) => {
-                    if (point[2] === currentFloor) {
-                        const x = (point[1] + 0.5) * cellSize;
-                        const y = (point[0] + 0.5) * cellSize;
-                        if (index === 0) {
-                            ctx.moveTo(x, y);
+
+                let curdist = 0;
+                for (let i = 1; i < route.optimal_path.length; i++) {
+                    const prevPoint = route.optimal_path[i - 1];
+                    const currentPoint = route.optimal_path[i];
+
+                    if (prevPoint[2] === currentFloor && currentPoint[2] === currentFloor) {
+                        const [y1, x1] = prevPoint;
+                        const [y2, x2] = currentPoint;
+                        
+                        const segmentDist = Math.sqrt((x2-x1)**2 + (y2-y1)**2) * bufferedGridData.grid_size;
+                        curdist += segmentDist;
+
+                        ctx.beginPath();
+                        ctx.moveTo((x1 + 0.5) * cellSize, (y1 + 0.5) * cellSize);
+                        ctx.lineTo((x2 + 0.5) * cellSize, (y2 + 0.5) * cellSize);
+
+                        if (curdist > route.distance_to_stair) {
+                            ctx.strokeStyle = hasViolations ? 
+                                (route.violations['daytime'].length === 0 ? 'rgba(255, 165, 0, 1)' : 'rgba(255, 0, 0, 1)') :
+                                'rgba(0, 255, 0, 1)';
                         } else {
-                            ctx.lineTo(x, y);
+                            ctx.strokeStyle = hasViolations ? 
+                                (route.violations['daytime'].length === 0 ? 'rgba(210, 135, 0, 1)' : 'rgba(210, 0, 0, 1)') :
+                                'rgba(0, 210, 0, 1)';
                         }
+
+                        ctx.stroke();
                     }
-                    prevPoint = point;
-                });
-                ctx.stroke();
+                }
 
                 route.optimal_path.forEach((point, index) => {
                     if (point[2] === currentFloor) {
