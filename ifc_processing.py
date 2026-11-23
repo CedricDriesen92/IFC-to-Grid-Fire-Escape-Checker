@@ -10,6 +10,7 @@ import ifcopenshell.file
 import math
 import multiprocessing
 import numpy as np
+from scipy.spatial import ConvexHull
 from collections import Counter
 from typing import Dict, List, Tuple, Any, Optional
 import traceback
@@ -158,6 +159,37 @@ def cells_to_runs(xs: np.ndarray, ys: np.ndarray) -> List[List[int]]:
     starts = np.concatenate([[0], breaks])
     ends = np.concatenate([breaks, [len(xs)]]) - 1
     return [[int(xs[a]), int(ys[a]), int(ys[b])] for a, b in zip(starts, ends)]
+
+
+def door_rectangle(points: np.ndarray, extension: float = 0.0) -> np.ndarray:
+    """Smallest-area rectangle around 2D points (4 x 2 corners, in order), deepened by extension on both long sides.
+
+    Rotating calipers over the convex hull's edges; for points on a line (or fewer than 3) the axis-aligned box."""
+    points = np.unique(np.round(points, 6), axis=0)
+    axes = [(np.array([1.0, 0.0]), np.array([0.0, 1.0]))]
+    if len(points) >= 3:
+        try:
+            hull = points[ConvexHull(points).vertices]
+            edges = np.roll(hull, -1, axis=0) - hull
+            lengths = np.hypot(edges[:, 0], edges[:, 1])
+            for edge, length in zip(edges, lengths):
+                if length > 1e-9:
+                    u = edge / length
+                    axes.append((u, np.array([-u[1], u[0]])))
+        except Exception:  # degenerate hull: points on a line
+            pass
+    best = None
+    for u, v in axes:
+        pu, pv = points @ u, points @ v
+        area = (pu.max() - pu.min()) * (pv.max() - pv.min())
+        if best is None or area < best[0] - 1e-12:
+            best = (area, u, v, pu.min(), pu.max(), pv.min(), pv.max())
+    _, u, v, u0, u1, v0, v1 = best
+    if (u1 - u0) < (v1 - v0):  # make u the door's width and v its depth
+        u, v, u0, u1, v0, v1 = v, u, v0, v1, u0, u1
+    v0 -= extension
+    v1 += extension
+    return np.array([u * u0 + v * v0, u * u1 + v * v0, u * u1 + v * v1, u * u0 + v * v1])
 
 
 class IFCProcessor:
@@ -381,7 +413,7 @@ class IFCProcessor:
         for floor_index, floor in enumerate(self.floors):
             if min_z < floor['elevation'] + 2 and max_z > floor['elevation'] + 0.1:
                 if element_type == 'door':
-                    cells = self.mark_door(floor_index, min_x, min_y, max_x, max_y, floor)
+                    cells = self.mark_door(floor_index, verts)
                     self.record_door(element, floor_index, cells)
                 else:
                     self.mark_triangles(verts, faces, self.grids[floor_index], floor, element_type)
@@ -431,25 +463,21 @@ class IFCProcessor:
             'fire_exit': door_common.get('FireExit'),
         })
 
-    def mark_door(self, floor_index: int, min_x: float, min_y: float, max_x: float, max_y: float, floor: Dict[str, float]) -> List[int]:
-        start_x = (min_x - self.bbox['min_x']) / self.grid_size
-        end_x = (max_x - self.bbox['min_x']) / self.grid_size
-        start_y = (min_y - self.bbox['min_y']) / self.grid_size
-        end_y = (max_y - self.bbox['min_y']) / self.grid_size
-        size_x = abs(start_x - end_x)
-        size_y = abs(start_y - end_y)
-        if size_x > size_y:  # Extend doors somewhat, prevents them being blocked by walls extending slightly too far.
-            start_y = start_y - 0.1 / self.grid_size
-            end_y = end_y + 0.1 / self.grid_size
-        else:
-            start_x = start_x - 0.1 / self.grid_size
-            end_x = end_x + 0.1 / self.grid_size
-        start_x = int(max(0, start_x))
-        end_x = int(min(float(self.grids[floor_index].shape[0] - 1), end_x))
-        start_y = int(max(0, start_y))
-        end_y = int(min(float(self.grids[floor_index].shape[1] - 1), end_y))
-        self.grids[floor_index][start_x:end_x + 1, start_y:end_y + 1] = 'door'
-        return [start_x, end_x, start_y, end_y]
+    def mark_door(self, floor_index: int, verts: np.ndarray, extension: float = 0.1) -> List[int]:
+        """Mark a door's footprint along its own orientation (rotated buildings keep narrow doors).
+
+        The footprint is the smallest rectangle around the door in plan, made 0.1 m deeper on both sides so it
+        cuts through walls that reach slightly too far. Returns the bounding cells [x0, x1, y0, y1]."""
+        rectangle = door_rectangle(verts[:, :2], extension)
+        origin = np.array([self.bbox['min_x'], self.bbox['min_y']])
+        corners = (rectangle - origin) / self.grid_size
+        triangles = np.array([[corners[0], corners[1], corners[2]], [corners[0], corners[2], corners[3]]])
+        grid = self.grids[floor_index]
+        xs, ys = cells_overlapping_triangles(triangles, grid.shape)
+        if len(xs) == 0:
+            return [0, -1, 0, -1]
+        grid[xs, ys] = 'door'
+        return [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())]
 
     def get_element_type(self, element: ifcopenshell.entity_instance) -> Optional[str]:
         return get_element_type(element)

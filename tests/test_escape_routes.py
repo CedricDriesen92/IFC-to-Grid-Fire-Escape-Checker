@@ -86,6 +86,27 @@ def test_batched_scanline_rasterisation_matches_the_single_triangle_test():
     assert set(zip(xs.tolist(), ys.tolist())) == single
 
 
+def test_rotated_door_is_marked_along_its_own_axes():
+    """A 1.0 x 0.2 m door turned 30 degrees: its 1.0 x 0.4 m rectangle (0.1 m deeper on both sides), not the
+    0.9 m2 axis-aligned box around it."""
+    from ifc_processing import door_rectangle
+    angle = np.radians(30)
+    u = np.array([np.cos(angle), np.sin(angle)])
+    v = np.array([-u[1], u[0]])
+    corners = np.array([a * u + b * v for a in (0, 1.0) for b in (0, 0.2)]) + [2.0, 2.0]
+    verts = np.hstack([np.vstack([corners, corners]), np.repeat([[0.0], [2.0]], 4, axis=0)])
+    rect = door_rectangle(verts[:, :2], 0.1)
+    assert np.linalg.norm(rect[1] - rect[0]) == pytest.approx(1.0)
+    assert np.linalg.norm(rect[3] - rect[0]) == pytest.approx(0.4)
+
+    proc = IFCProcessor('unused', GS)
+    proc.bbox = {'min_x': 0.0, 'min_y': 0.0}
+    proc.grids = [np.full((50, 50), 'wall', dtype=object)]
+    proc.mark_door(0, verts)
+    marked = int((proc.grids[0] == 'door').sum())
+    assert 40 <= marked <= 75, marked   # 0.4 m2 is 40 cells; the axis-aligned box would be about 90
+
+
 def test_packed_grids_round_trip():
     names = [[['empty', 'floor', 'wall'], ['door', 'stair', 'walla']]]
     codes = to_codes(names)
