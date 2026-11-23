@@ -27,6 +27,43 @@ let animationInterval = null;
 let pathData = null;
 let allowDiagonal = true;
 let minimizeCost = false;
+let requireSecondExit = false;
+let spaceSource = 'ifc';
+let occupancy = null;
+let notChecked = [];
+
+// Packed grids: one character per cell, rows as strings (see grid_codec.py). About 8x smaller than nested names.
+const CELL_CHARS = {empty: 'e', floor: 'f', wall: 'w', door: 'd', stair: 's', walla: 'a'};
+const CHAR_CELLS = {e: 'empty', f: 'floor', w: 'wall', d: 'door', s: 'stair', a: 'walla'};
+
+function isPacked(grids) {
+    return Array.isArray(grids) && grids.length > 0 && grids[0].length > 0 && typeof grids[0][0] === 'string';
+}
+
+const CELL_BYTES = {};
+const BYTE_CELLS = new Array(256).fill('empty');
+for (const [cell, ch] of Object.entries(CELL_CHARS)) {
+    CELL_BYTES[cell] = ch.charCodeAt(0);
+    BYTE_CELLS[ch.charCodeAt(0)] = cell;
+}
+const latin1 = new TextDecoder('latin1');
+
+function packGrids(grids) {
+    return grids.map(floor => floor.map(row => {
+        const bytes = new Uint8Array(row.length);
+        for (let j = 0; j < row.length; j++) bytes[j] = CELL_BYTES[row[j]] || 101;  // 101 = 'e'
+        return latin1.decode(bytes);
+    }));
+}
+
+function unpackGrids(grids) {
+    if (!isPacked(grids)) return grids;
+    return grids.map(floor => floor.map(row => {
+        const cells = new Array(row.length);
+        for (let j = 0; j < row.length; j++) cells[j] = BYTE_CELLS[row.charCodeAt(j)];
+        return cells;
+    }));
+}
 let spacesData = [];
 let includeEmptyTiles = false;
 let foundEscapeRoutes = null;
@@ -109,6 +146,16 @@ allowDiagonal = e.target.checked;
 });
 minimizeCostCheckbox.addEventListener('change', (e) => {
     minimizeCost = e.target.checked;
+});
+document.getElementById('require-second-exit').addEventListener('change', (e) => {
+    requireSecondExit = e.target.checked;
+});
+document.getElementById('space-source').addEventListener('change', (e) => {
+    spaceSource = e.target.value;
+});
+document.getElementById('occupancy').addEventListener('change', (e) => {
+    const value = parseFloat(e.target.value);
+    occupancy = Number.isFinite(value) ? value : null;
 });
 //updateIfcForm.addEventListener('submit', updateIfcWithRoutes);
 gridContainer.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -237,6 +284,7 @@ async function uploadFile(event) {
         } else {
             isIFC = true;
             // Handle IFC file
+            formData.append('packed', '1');
             const response = await fetch('/api/process-file', {
                 method: 'POST',
                 body: formData
@@ -283,11 +331,13 @@ function exportGrid() {
     }
 
     const dataToSave = {
-        grids: originalGridData.grids,
+        grids: packGrids(originalGridData.grids),
         grid_size: originalGridData.grid_size,
         floors: originalGridData.floors,
         bbox: originalGridData.bbox,
         unit_size: originalGridData.unit_size,
+        doors: originalGridData.doors || [],
+        ifc_spaces: originalGridData.ifc_spaces || [],
         original_ifc_filename: file ? file.name : null
     };
 
@@ -310,6 +360,7 @@ function exportGrid() {
 }
 
 function handleProcessedData(data) {
+    data.grids = unpackGrids(data.grids);
     originalGridData = data;
     bufferedGridData = {...data};
     console.log(originalGridData.floors);
@@ -328,6 +379,16 @@ function handleProcessedData(data) {
         console.error('Invalid grids data in loaded file:', originalGridData.grids);
         showError('Invalid grids data in loaded file');
         return;
+    }
+
+    const skipped = (data.warnings && data.warnings.skipped_elements) || {};
+    const skippedList = Object.entries(skipped).map(([type, count]) => `${count} ${type}`);
+    if (skippedList.length > 0) {
+        showMessage(`These elements had no usable geometry and are missing from the grid: ${skippedList.join(', ')}. Check the grid and paint them in if needed.`);
+    }
+    const dropped = (data.warnings && data.warnings.spaces_on_no_floor) || [];
+    if (dropped.length > 0) {
+        console.warn(`IfcSpaces on no grid floor, not checked: ${dropped.join(', ')}`);
     }
 
     console.log('Grid data seems valid, initializing grid...');
@@ -407,26 +468,81 @@ function drawGridBorders(width, height, cellSize, ctx) {
     ctx.stroke();
 }
 
+// Browsers refuse canvases above about 16k pixels a side or ~270M pixels: keep well inside.
+const MAX_CANVAS_SIDE = 16000;
+const MAX_CANVAS_AREA = 120e6;
+
+function clampCellSize(grid) {
+    const rows = grid.length, cols = grid[0].length;
+    const maxCell = Math.min(MAX_CANVAS_SIDE / cols, MAX_CANVAS_SIDE / rows, Math.sqrt(MAX_CANVAS_AREA / (rows * cols)));
+    if (cellSize > maxCell) {
+        cellSize = maxCell;
+        zoomLevel = cellSize * 100 / bufferedGridData.grid_size;
+        updateZoomLevel();
+    }
+}
+
+const cellRgbCache = {};
+function cellRgb(cellType) {
+    if (!cellRgbCache[cellType]) {
+        const hex = getCellColor(cellType);
+        cellRgbCache[cellType] = [1, 3, 5].map(i => parseInt(hex.substr(i, 2), 16));
+    }
+    return cellRgbCache[cellType];
+}
+
+let baseLayerCanvas = null;
+// One pixel per cell in an offscreen canvas, drawn scaled up: one draw call instead of one rectangle per cell.
+function drawBaseLayer(ctx, grid) {
+    const rows = grid.length, cols = grid[0].length;
+    const original = originalGridData.grids[currentFloor];
+    const image = new ImageData(cols, rows);
+    const pixels = image.data;
+    let k = 0;
+    for (let i = 0; i < rows; i++) {
+        const row = grid[i], originalRow = original[i];
+        for (let j = 0; j < cols; j++) {
+            let cell = row[j];
+            if (cell === 'walla' && !showBuffer) cell = originalRow[j];
+            const rgb = cellRgb(cell);
+            pixels[k] = rgb[0]; pixels[k + 1] = rgb[1]; pixels[k + 2] = rgb[2]; pixels[k + 3] = 255;
+            k += 4;
+        }
+    }
+    if (!baseLayerCanvas) baseLayerCanvas = document.createElement('canvas');
+    baseLayerCanvas.width = cols;
+    baseLayerCanvas.height = rows;
+    baseLayerCanvas.getContext('2d').putImageData(image, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(baseLayerCanvas, 0, 0, cols * cellSize, rows * cellSize);
+}
+
 function renderGrid(grid) {
-    gridContainer.innerHTML = '';
-    const canvas = document.createElement('canvas');
+    clampCellSize(grid);
+    let canvas = gridContainer.querySelector('canvas');
+    if (!canvas) {
+        canvas = document.createElement('canvas');
+        gridContainer.appendChild(canvas);
+    }
     const ctx = canvas.getContext('2d');
 
-    canvas.width = grid[0].length * cellSize;
-    canvas.height = grid.length * cellSize;
+    const width = grid[0].length * cellSize;
+    const height = grid.length * cellSize;
+    if (canvas.width !== Math.floor(width) || canvas.height !== Math.floor(height)) {
+        canvas.width = width;
+        canvas.height = height;
+    } else {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
 
     // Render the base grid
-    grid.forEach((row, i) => {
-        row.forEach((cell, j) => {
-            ctx.fillStyle = getCellColor(cell);//mixHexes(getCellColor(cell), getCellColor(originalGridData.grids[currentFloor][i][j]), 0.7);
-            if(cell == 'walla' && !showBuffer){
-                ctx.fillStyle = getCellColor(originalGridData.grids[currentFloor][i][j]);
-            }
-            ctx.fillRect(j * cellSize, i * cellSize, cellSize, cellSize);
-        });
-    });
+    drawBaseLayer(ctx, grid);
 
-    drawGridBorders(canvas.width, canvas.height, cellSize, ctx);
+    // Cell lines only when cells are big enough to see them
+    if (cellSize >= 4) {
+        drawGridBorders(canvas.width, canvas.height, cellSize, ctx);
+    }
 
     // Render spaces
     if(showSpaces){
@@ -764,7 +880,9 @@ async function updateSpaces() {
             },
             body: JSON.stringify({
                 include_empty_tiles: includeEmptyTiles,
-                grids: bufferedGridData.grids,
+                ifc_spaces: originalGridData.ifc_spaces || [],
+                space_source: spaceSource,
+                grids: packGrids(bufferedGridData.grids),
                 grid_size: bufferedGridData.grid_size,
                 floors: bufferedGridData.floors,
                 bbox: bufferedGridData.bbox,
@@ -1295,7 +1413,7 @@ async function findPath() {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                grids: bufferedGridData.grids,
+                grids: packGrids(bufferedGridData.grids),
                 grid_size: bufferedGridData.grid_size,
                 floors: bufferedGridData.floors,
                 bbox: bufferedGridData.bbox,
@@ -1358,8 +1476,8 @@ async function createOrFetchGraph() {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-            original_grids: originalGridData.grids,
-            buffered_grids: bufferedGridData.grids,
+            original_grids: packGrids(originalGridData.grids),
+            buffered_grids: packGrids(bufferedGridData.grids),
             grid_size: bufferedGridData.grid_size,
             floors: bufferedGridData.floors,
             bbox: bufferedGridData.bbox,
@@ -1395,60 +1513,55 @@ async function calculateEscapeRoutes() {
         await createOrFetchGraph();
         await getStairConnections();
 
-        for (let i = 0; i < spacesData.length; i++) {
-            const space = spacesData[i];
-            updateProgress((i / spacesData.length) * 100, `Calculating route for space ${i + 1} of ${spacesData.length}`);
+        // All spaces in one request: the server computes one distance field from the exits.
+        updateProgress(50, `Calculating routes for ${spacesData.length} spaces`);
+        const response = await fetch('/api/calculate-escape-routes', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                exits: goals.map(goal => [goal.row, goal.col, goal.floor]),
+                spaces: spacesData,
+                require_second_exit: requireSecondExit,
+                occupancy: occupancy
+            })
+        });
 
-            try {
-                const response = await fetch('/api/calculate-escape-route', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        space: space,
-                        exits: goals.map(goal => [goal.row, goal.col, goal.floor]),
-                        spaces: spacesData
-                    })
-                });
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(`HTTP error! status: ${response.status}, message: ${errorData.error || 'Unknown error'}`);
+        }
 
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(`HTTP error! status: ${response.status}, message: ${errorData.error || 'Unknown error'}`);
+        const data = await response.json();
+        notChecked = data.not_checked || [];
+        for (const route of data.escape_routes) {
+            foundEscapeRoutes.push(route);
+
+            // Check rules
+            const violations = route.violations;
+            if (violations['general'].length > 0 || violations['daytime'].length > 0 || violations['nighttime'].length > 0) {
+                spacesWithViolations.push({space: route.space_name, violations});
+            }
+
+            // Update statistics
+            if (route.distance !== null && route.distance !== undefined) {
+                totalLength = Math.max(totalLength, route.distance);
+                stairwayDistance = Math.max(stairwayDistance, route.distance_to_stair);
+                if (route.distance_to_stair > maxStairDistance || route.distance > maxStairDistance) {
+                    spacesOverMaxDistance.push(route.space_name);
                 }
-
-                const data = await response.json();
-                foundEscapeRoutes.push(data.escape_route);
-
-                // Check rules
-                const violations = data.escape_route.violations;
-                if (violations['general'].length > 0 || violations['daytime'].length > 0 || violations['nighttime'].length > 0) {
-                    spacesWithViolations.push({space: space.name, violations});
-                }
-
-                // Update statistics
-                if (data.escape_route.distance) {
-                    totalLength = Math.max(totalLength, data.escape_route.distance);
-                    stairwayDistance = Math.max(stairwayDistance, data.escape_route.distance_to_stair);
-                    if (data.escape_route.distance_to_stair > maxStairDistance || data.escape_route.distance > maxStairDistance) {
-                        spacesOverMaxDistance.push(data.escape_route.space_name);
-                    }
-                } else {
-                    spacesWithoutExits.push(data.escape_route.space_name);
-                }
-
-                // Render the current progress
-                displayViolations(spacesWithViolations);
-                renderGrid(bufferedGridData.grids[currentFloor]);
-
-            } catch (error) {
-                console.error('Error calculating escape route for space:', space.name, error);
+            } else {
+                spacesWithoutExits.push(route.space_name);
             }
         }
 
+        displayViolations(spacesWithViolations);
+        renderGrid(bufferedGridData.grids[currentFloor]);
+
     } catch (error) {
-        console.error('Error creating graph:', error);
-        showError(`An error occurred while creating the graph: ${error.message}`);
+        console.error('Error calculating escape routes:', error);
+        showError(`An error occurred while calculating the escape routes: ${error.message}`);
     }
 
     document.getElementById('update-ifc-button').style.display = 'block';
@@ -1540,7 +1653,9 @@ async function exportPdfReport() {
                 escape_routes: foundEscapeRoutes,
                 grid_size: bufferedGridData.grid_size,
                 floors: bufferedGridData.floors,
-                'filename': file.name
+                'filename': file.name,
+                require_second_exit: requireSecondExit,
+                occupancy: occupancy
             })
         });
 
@@ -1553,7 +1668,7 @@ async function exportPdfReport() {
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        a.download = file.name.split(".")[0] + '_escape_routes_report.pdf';
+        a.download = file.name.replace(/\.[^.]+$/, '') + '_escape_routes_report.pdf';
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);
@@ -1600,12 +1715,9 @@ async function handleIfcFileSelection(event) {
 
 function displayViolations(spacesWithViolations) {
     const violationsElement = document.getElementById('violations');
-    if (spacesWithViolations.length === 0) {
-        violationsElement.innerHTML = '<p>No rule violations found.</p>';
-        return;
-    }
-
-    let violationsHTML = '<h3 class="text-lg font-semibold mb-2">Rule Violations:</h3>';
+    let violationsHTML = spacesWithViolations.length === 0
+        ? '<p>No rule violations found.</p>'
+        : '<h3 class="text-lg font-semibold mb-2">Rule Violations:</h3>';
     spacesWithViolations.forEach(({space, violations}) => {
         violationsHTML += `<h4 class="text-md font-semibold mt-2">${space}:</h4>`;
         for (const [timeOfDay, violationList] of Object.entries(violations)) {
@@ -1619,6 +1731,11 @@ function displayViolations(spacesWithViolations) {
         }
     });
 
+    if (notChecked.length > 0) {
+        violationsHTML += '<h3 class="text-sm font-semibold mt-3">Not checked:</h3><ul class="list-disc pl-5">';
+        notChecked.forEach(item => { violationsHTML += `<li class="text-xs">${item}</li>`; });
+        violationsHTML += '</ul>';
+    }
     violationsElement.innerHTML = violationsHTML;
 }
 
@@ -1653,7 +1770,8 @@ async function applyWallBuffer() {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                grids: originalGridData.grids,
+                grids: packGrids(originalGridData.grids),
+                packed: true,
                 wall_buffer: wallBuffer,
                 grid_size: originalGridData.grid_size,
                 floors: originalGridData.floors,
@@ -1663,7 +1781,7 @@ async function applyWallBuffer() {
         const data = await response.json();
         if (response.ok) {
             if (Array.isArray(data.buffered_grids) && data.buffered_grids.every(Array.isArray)) {
-                bufferedGridData = {...originalGridData, grids: data.buffered_grids};
+                bufferedGridData = {...originalGridData, grids: unpackGrids(data.buffered_grids)};
                 renderGrid(bufferedGridData.grids[currentFloor]);
             } else {
                 throw new Error('Received invalid grid data from server');
@@ -1685,7 +1803,8 @@ async function updateCell(floor, row, col, cellType) {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                grids: originalGridData.grids,
+                grids: packGrids(originalGridData.grids),
+                packed: true,
                 floor: floor,
                 row: row,
                 col: col,
@@ -1698,8 +1817,8 @@ async function updateCell(floor, row, col, cellType) {
         });
         const data = await response.json();
         if (response.ok) {
-            originalGridData.grids = data.original_grids;
-            bufferedGridData = {...originalGridData, grids: data.buffered_grids};
+            originalGridData.grids = unpackGrids(data.original_grids);
+            bufferedGridData = {...originalGridData, grids: unpackGrids(data.buffered_grids)};
         } else {
             throw new Error(data.error || 'An error occurred while updating the cell.');
         }
@@ -1717,7 +1836,8 @@ async function batchUpdateCells(updates) {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                grids: originalGridData.grids,
+                grids: packGrids(originalGridData.grids),
+                packed: true,
                 updates: updates,
                 wall_buffer: wallBuffer,
                 grid_size: originalGridData.grid_size,
@@ -1727,8 +1847,8 @@ async function batchUpdateCells(updates) {
         });
         const data = await response.json();
         if (response.ok) {
-            originalGridData.grids = data.original_grids;
-            bufferedGridData = {...originalGridData, grids: data.buffered_grids};
+            originalGridData.grids = unpackGrids(data.original_grids);
+            bufferedGridData = {...originalGridData, grids: unpackGrids(data.buffered_grids)};
         } else {
             throw new Error(data.error || 'An error occurred while updating cells.');
         }
@@ -1746,10 +1866,12 @@ async function detectExits() {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                grids: bufferedGridData.grids,
+                grids: packGrids(bufferedGridData.grids),
                 grid_size: bufferedGridData.grid_size,
                 floors: bufferedGridData.floors,
-                bbox: bufferedGridData.bbox
+                bbox: bufferedGridData.bbox,
+                doors: originalGridData.doors || [],
+                original_grids: packGrids(originalGridData.grids)
             })
         });
         const data = await response.json();

@@ -1,236 +1,457 @@
+"""Escape routes on the grid, checked against KB 7 July 1994, annex 2/1 (low buildings, LG).
+
+The grid becomes a sparse graph (one node per passable cell, scipy CSR), searched with scipy's Dijkstra in C.
+
+Exits follow LG 4.4.1.2: a door to the open air on an evacuation level, or the access to a stairwell (a stair
+that reaches an evacuation level) on any other floor. Distances are measured on the person's own floor to the
+access of the exit (LG 4.4.1.1); the way through the stairwell and in the open air does not count."""
 import math
-import networkx as nx
-import numpy as np
-from typing import List, Tuple, Dict, Any
 from collections import defaultdict
+from typing import List, Tuple, Dict, Any, Optional
+
+import numpy as np
+from scipy import ndimage, sparse
+from scipy.sparse.csgraph import dijkstra, connected_components
+from scipy.spatial import cKDTree
 
 import logging
-import traceback
+
+from grid_codec import NAMES, DOOR, STAIR, PASSABLE, to_codes
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+BLOCKED = ('wall', 'walla', 'empty')
+
+# LG 4.4.1.1, metres
+MAX_TRAVEL_DISTANCES = {
+    'daytime': {
+        'toEvacRoute': 30,
+        'toNearestExit': 45,
+        'toSecondExit': 80
+    },
+    'nighttime': {
+        'toEvacRoute': 20,
+        'toNearestExit': 30,
+        'toSecondExit': 60
+    }
+}
+# Second exits further than this (metres) are reported as "more than" it instead of measured.
+SECOND_EXIT_SEARCH_LIMIT = 100.0
+
+# What the grid cannot show; reported with the results so a pass is not read as full compliance.
+NOT_CHECKED = [
+    "LG 4.4.1.1: distance to the evacuation route connecting the exits (30 m day / 20 m night): evacuation routes are not identified on the grid",
+    "LG 4.4.1.1: dead ends of at most 15 m",
+    "LG 4.4.1.1 and annex 1, 5.6.7: required useful width per occupant (1 cm per person on routes and doors, in units of 0.60 m); only the 0.80 m minimum is checked, through the wall buffer",
+    "LG 4.4.1.2: protected evacuation routes and external stairs as exits, and whether stairwells are enclosed (LG 4.2)",
+    "LG 2.2.2: exits in opposite zones of the compartment",
+    "Compartments: every space is checked on its own; parkings (LG 5.2) are not excluded",
+]
+
+_NAME_ARRAY = np.array(NAMES, dtype=object)
+
+
+def required_exits(occupancy: Optional[float]) -> int:
+    """LG 2.2.1: one exit below 100 persons, two from 100 to 499, 2 + n from 500 on, n being the whole number
+    immediately greater than occupancy / 1000."""
+    if occupancy is None or occupancy < 100:
+        return 1
+    if occupancy < 500:
+        return 2
+    return 2 + int(occupancy // 1000) + 1
+
+
 class Pathfinder:
-    def __init__(self, original_grids: List[List[List[str]]], buffered_grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = False):
+    def __init__(self, original_grids, buffered_grids, grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], allow_diagonal: bool = True, minimize_cost: bool = False):
         self.original_grids = original_grids
         self.buffered_grids = buffered_grids
-        self.grids = buffered_grids
         self.grid_size = grid_size
         self.floors = floors
         self.bbox = bbox
         self.allow_diagonal = allow_diagonal
         self.minimize_cost = minimize_cost
-        self.graph = None
+
+        self.codes = np.stack(to_codes(buffered_grids))
+        self.original_codes = self.codes if original_grids is buffered_grids else np.stack(to_codes(original_grids))
+        self.grids = self.codes  # self.grids[f][x][y] is a cell code
+        self.F, self.R, self.C = self.codes.shape
+        self.N = self.F * self.R * self.C
+        self.passable = np.isin(self.codes, PASSABLE)
+
+        self.graph = None     # all edges (CSR, directed both ways)
+        self.planar = None    # without the stair edges between floors
+        self.stair_edges: List[Tuple[Tuple[int, int, int], Tuple[int, int, int], float]] = []
+        self._stair_labels = None
+        self._components = None
+        self._planar_labels = None
+        self._fields = {}
+
+    # ---------------------------------------------------------------- nodes
+
+    def index(self, node) -> int:
+        x, y, f = (int(v) for v in node)
+        return (f * self.R + x) * self.C + y
+
+    def node(self, index: int) -> Tuple[int, int, int]:
+        f, rest = divmod(int(index), self.R * self.C)
+        x, y = divmod(rest, self.C)
+        return (x, y, f)
+
+    def __contains__(self, node) -> bool:
+        x, y, f = node
+        return 0 <= f < self.F and 0 <= x < self.R and 0 <= y < self.C and bool(self.passable[f, x, y])
+
+    def cell_name(self, node) -> str:
+        x, y, f = node
+        return NAMES[self.codes[f, x, y]]
+
+    # ---------------------------------------------------------------- graph
 
     def create_graph(self):
-        self.graph = self._create_graph()
-        return self.graph
-    
-    def _create_graph(self) -> nx.Graph:
-        G = nx.Graph()
-        
-        for floor, grid in enumerate(self.buffered_grids):
-            for x in range(len(grid)):
-                for y in range(len(grid[0])):
-                    if grid[x][y] not in ['wall', 'walla', 'empty']:
-                        node = (x, y, floor)
-                        G.add_node(node, floor=floor, type=grid[x][y])
-                        
-                        # Connect to neighbors
-                        neighbors = [(0, 1), (1, 0), (0, -1), (-1, 0)]
-                        if self.allow_diagonal:
-                            neighbors += [(1, 1), (1, -1), (-1, 1), (-1, -1)]
-                        
-                        for dx, dy in neighbors:
-                            n_x, n_y = x + dx, y + dy
-                            if 0 <= n_x < len(grid) and 0 <= n_y < len(grid[0]):
-                                if grid[n_x][n_y] not in ['wall', 'walla', 'empty']:
-                                    neighbor = (n_x, n_y, floor)
-                                    weight = self._get_edge_weight(grid[x][y], neighbor=grid[n_x][n_y], is_diagonal=(dx != 0 and dy != 0))
-                                    G.add_edge(node, neighbor, weight=weight)
-        
-        self._connect_stairs(G)
-        
-        return G
+        idx = np.arange(self.N, dtype=np.int64).reshape(self.F, self.R, self.C)
+        P = self.passable
+        directions = [(0, 1, 1.0), (1, 0, 1.0)]
+        if self.allow_diagonal:
+            directions += [(1, 1, math.sqrt(2)), (1, -1, math.sqrt(2))]
 
-    def _get_edge_weight(self, cell_type: str, neighbor: str = None, is_diagonal: bool = False) -> float:
-        if self.minimize_cost:
-            if neighbor and cell_type != neighbor:
-                weights = {
-                    'empty': 1.0,
-                    'floor': 1.0,
-                    'door': 4,
-                    'stair': 4,
-                }
-                weight = weights.get(cell_type, 1.0)
-            else:
-                weight = 1.0
+        sources, targets, weights = [], [], []
+        for dx, dy, base in directions:
+            xa, xb = slice(0, self.R - dx), slice(dx, self.R)
+            ya, yb = (slice(0, self.C - dy), slice(dy, self.C)) if dy >= 0 else (slice(-dy, self.C), slice(0, self.C + dy))
+            both = P[:, xa, ya] & P[:, xb, yb]
+            a = idx[:, xa, ya][both]
+            b = idx[:, xb, yb][both]
+            w = np.full(len(a), base)
+            if self.minimize_cost:
+                ta = self.codes[:, xa, ya][both]
+                tb = self.codes[:, xb, yb][both]
+                special = np.isin(ta, (DOOR, STAIR)) | np.isin(tb, (DOOR, STAIR))
+                w[(ta != tb) & special] *= 2.5  # entering and leaving a door: 5 instead of 2
+            sources.append(a)
+            targets.append(b)
+            weights.append(w)
+
+        a = np.concatenate(sources)
+        b = np.concatenate(targets)
+        w = np.concatenate(weights)
+        self.planar = sparse.csr_matrix((np.concatenate([w, w]), (np.concatenate([a, b]), np.concatenate([b, a]))),
+                                        shape=(self.N, self.N))
+
+        self.stair_edges = self._connect_stairs()
+        if self.stair_edges:
+            sa = np.array([self.index(u) for u, _, _ in self.stair_edges])
+            sb = np.array([self.index(v) for _, v, _ in self.stair_edges])
+            sw = np.array([w for _, _, w in self.stair_edges])
+            stairs = sparse.csr_matrix((np.concatenate([sw, sw]), (np.concatenate([sa, sb]), np.concatenate([sb, sa]))),
+                                       shape=(self.N, self.N))
+            self.graph = (self.planar + stairs).tocsr()
         else:
-            weight = 1.0  # All edges have the same weight when minimizing distance
-        
-        return weight * (2**0.5 if is_diagonal else 1.0)
+            self.graph = self.planar
+        self._components = None
+        self._planar_labels = None
+        self._fields = {}
+        return self.graph
 
-    def _group_connected_stairs(self):
-        stair_groups = []
-        visited = set()
+    def _stair_groups(self):
+        """3D groups of stair cells: 4-connected on a floor and joined to the cell straight above or below."""
+        if self._stair_labels is None:
+            stair = self.codes == STAIR
+            self._stair_labels = ndimage.label(stair, ndimage.generate_binary_structure(3, 1))
+        return self._stair_labels
 
-        for floor in range(len(self.grids)):
-            for x in range(len(self.grids[floor])):
-                for y in range(len(self.grids[floor][0])):
-                    if self.grids[floor][x][y] == 'stair' and (x, y, floor) not in visited:
-                        group = self._flood_fill_3d(x, y, floor)
-                        stair_groups.append(group)
-                        visited.update(group)
+    def _connect_stairs(self) -> List[Tuple[Tuple[int, int, int], Tuple[int, int, int], float]]:
+        """Edges between the stair cells of two floors, a stair's run apart at 35 to 75 degrees (first angle
+        that gives any), at most one new edge per 26 lower cells; otherwise each lower cell to its nearest upper."""
+        labels, count = self._stair_groups()
+        edges = []
+        for group in range(1, count + 1):
+            cells = np.argwhere(labels == group)  # (f, x, y), sorted
+            floors = sorted(set(cells[:, 0].tolist()))
+            for lower_floor, upper_floor in zip(floors, floors[1:]):
+                lower = [tuple(c) for c in cells[cells[:, 0] == lower_floor][:, 1:].tolist() if self.passable[lower_floor, c[0], c[1]]]
+                upper_cells = cells[cells[:, 0] == upper_floor][:, 1:]
+                upper_cells = upper_cells[self.passable[upper_floor, upper_cells[:, 0], upper_cells[:, 1]]]
+                if not lower or len(upper_cells) == 0:
+                    continue
+                upper = set(map(tuple, upper_cells.tolist()))
+                height = self.floors[upper_floor]['elevation'] - self.floors[lower_floor]['elevation']
 
-        return stair_groups
+                made = []
+                angle = 35
+                while angle <= 80 and not made:
+                    run = height / math.tan(math.radians(angle)) / self.grid_size
+                    offsets = [(int(round(run * math.cos(k * math.pi / 4))), int(round(run * math.sin(k * math.pi / 4))))
+                               for k in range(8)]
+                    since_last = 25
+                    for x, y in lower:
+                        since_last += 1
+                        if since_last <= 25:
+                            continue
+                        for dx, dy in offsets:
+                            if (x + dx, y + dy) in upper:
+                                made.append(((x, y, lower_floor), (x + dx, y + dy, upper_floor)))
+                                since_last = 0
+                                break
+                    if not made:
+                        angle += 10
+                if not made:
+                    logger.info(f"No stair connections between floors {lower_floor} and {upper_floor} at 35-80 degrees, using fallback method")
+                    tree = cKDTree(upper_cells)
+                    _, nearest = tree.query(np.array(lower))
+                    made = [((x, y, lower_floor), (int(upper_cells[j][0]), int(upper_cells[j][1]), upper_floor))
+                            for (x, y), j in zip(lower, nearest)]
+                for u, v in made:
+                    edges.append((u, v, self._stair_weight(u, v, height)))
+        return edges
 
-    def _flood_fill_3d(self, start_x, start_y, start_floor):
-        queue = [(start_x, start_y, start_floor)]
-        visited = set()
+    def _stair_weight(self, u, v, height_diff) -> float:
+        """Walked length of a stair edge in grid cells: the 3D length, taking a stair steeper than 45 degrees as 45."""
+        horizontal = math.hypot(u[0] - v[0], u[1] - v[1]) * self.grid_size
+        horizontal = max(horizontal, abs(height_diff))
+        return math.sqrt(height_diff ** 2 + horizontal ** 2) / self.grid_size
 
-        while queue:
-            x, y, floor = queue.pop(0)
-            if (x, y, floor) in visited:
-                continue
+    def connected(self, a, b) -> bool:
+        if a not in self or b not in self:
+            return False
+        if self._components is None:
+            self._components = connected_components(self.graph, directed=False)[1]
+        return self._components[self.index(a)] == self._components[self.index(b)]
 
-            visited.add((x, y, floor))
+    # ------------------------------------------------------------------ exits
 
-            # Check neighbors on the same floor
+    def detect_exits(self, doors: Optional[List[Dict[str, Any]]] = None, evacuation_floors: Optional[List[int]] = None) -> List[Tuple[int, int, int]]:
+        """Doors to the open air on the evacuation level.
+
+        A door group leads outside when a door of the IFC data covering it has IsExternal TRUE. When none of its
+        doors says (no data, or an old grid file), the geometric test decides: a straight clear line from the door
+        to the edge of the grid. Upper floors have no doors to the open air that count (LG 4.4.1.2), so a balcony
+        door is never one.
+
+        Doors are found on the original grid (the wall buffer may block part of a door, which would split it or let
+        the line test pass through it); the exit cell is the door cell nearest the door's centre that the buffered
+        grid leaves open, or its centre cell when the whole door is too narrow."""
+        if evacuation_floors is None:
+            evacuation_floors = evacuation_levels(self.floors)
+        doors_by_floor = defaultdict(list)
+        for door in doors or []:
+            doors_by_floor[door.get('floor')].append(door)
+
+        exits = []
+        for floor_index in evacuation_floors:
+            original = self.original_codes[floor_index]
+            for door_group in self._group_connected_doors(original):
+                flags = [d.get('is_external') for d in doors_by_floor[floor_index] if _door_covers(d, door_group)]
+                known = [f for f in flags if f is not None]
+                is_exit = any(known) if known else self._is_exit_group(original, door_group)
+                if is_exit:
+                    open_cells = [p for p in door_group if self.passable[floor_index, p[0], p[1]]]
+                    exits.append(self._calculate_average_position(door_group, floor_index, open_cells))
+        return exits
+
+    @staticmethod
+    def _group_connected_doors(floor: np.ndarray) -> List[List[Tuple[int, int]]]:
+        labels, count = ndimage.label(floor == DOOR)
+        groups = []
+        for k, region in enumerate(ndimage.find_objects(labels), start=1):
+            local = np.argwhere(labels[region] == k) + (region[0].start, region[1].start)
+            groups.append([tuple(p) for p in local.tolist()])
+        return groups
+
+    @staticmethod
+    def _is_exit_group(floor: np.ndarray, door_group: List[Tuple[int, int]]) -> bool:
+        """A clear straight line (no wall or door) from a cell next to the door to the edge of the grid."""
+        rows, cols = floor.shape
+        stop = (floor == DOOR) | (floor == 2)  # door or wall
+        for x, y in door_group:
             for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-                nx, ny = x + dx, y + dy
-                if (0 <= nx < len(self.grids[floor]) and 
-                    0 <= ny < len(self.grids[floor][0]) and 
-                    self.grids[floor][nx][ny] == 'stair' and
-                    (nx, ny, floor) not in visited):
-                    queue.append((nx, ny, floor))
-
-            # Check directly above and below
-            for adj_floor in [floor - 1, floor + 1]:
-                if (0 <= adj_floor < len(self.grids) and 
-                    self.grids[adj_floor][x][y] == 'stair' and
-                    (x, y, adj_floor) not in visited):
-                    queue.append((x, y, adj_floor))
-
-        return visited
-
-    def _connect_stairs(self, G: nx.Graph):
-        angle = 35
-        stair_angle = angle  # 55 degree angle for stairs
-        num_directions = 8  # Number of directions to check
-        stair_groups = self._group_connected_stairs()
-
-        for group_index, group in enumerate(stair_groups):
-            floors = sorted(set(floor for _, _, floor in group))
-            
-            for i in range(len(floors) - 1):
-                stair_angle = angle  # start for every floor
-                lower_floor, upper_floor = floors[i], floors[i + 1]
-                lower_stairs = [pos for pos in group if pos[2] == lower_floor]
-                upper_stairs = [pos for pos in group if pos[2] == upper_floor]
-
-                height_diff = self.floors[upper_floor]['elevation'] - self.floors[lower_floor]['elevation']
-                grid_height = height_diff * self.grid_size
-                iter_angle = stair_angle
-                while iter_angle <= 80:
-                    horizontal_distance = height_diff / math.tan(math.radians(iter_angle))
-                    grid_distance = int(round(horizontal_distance / self.grid_size))
-
-                    #print(f"Height difference: {height_diff}")
-                    print(f"Calculated horizontal distance: {horizontal_distance}")
-                    #print(f"Grid distance: {grid_distance}")
-
-                    connections_made = 0
-                    connections_made_last = 25 # Wait X to find another connection
-                    for start_x, start_y, _ in lower_stairs:
-                        connections_made_last += 1
-                        if connections_made_last > 25:
-                            for end_x, end_y, _ in upper_stairs:
-                                if self._check_stair_connection(start_x, start_y, lower_floor, end_x, end_y, upper_floor, horizontal_distance, num_directions):
-                                    start_node = (start_x, start_y, lower_floor)
-                                    end_node = (end_x, end_y, upper_floor)
-                                    if start_node in G and end_node in G:
-                                        connections_made_last = 0
-                                        weight = self._calculate_stair_weight(start_node, end_node, grid_height)
-                                        #logger.debug(weight)
-                                        G.add_edge(start_node, end_node, weight=weight)
-                                        connections_made += 1
-                                        break
-                                    #print(f"Connected {start_node} to {end_node} with weight {weight}")
-                            #else:
-                            #    print(f"Failed to connect {(start_x, start_y, lower_floor)} to {(end_x, end_y, upper_floor)}")
-                    if connections_made > 0:
-                        break
-                    else:
-                        iter_angle += 10
-                if connections_made == 0:
-                    print(f"No connections made between floors {lower_floor} and {upper_floor}, using fallback method")
-                    self._connect_stairs_fallback(G, lower_stairs, upper_stairs)
+                nx_, ny_ = x + dx, y + dy
+                if not (0 <= nx_ < rows and 0 <= ny_ < cols) or stop[nx_, ny_]:
+                    continue
+                if dx:
+                    line = stop[nx_:, ny_] if dx > 0 else stop[:nx_ + 1, ny_][::-1]
                 else:
-                    print(f"Made {connections_made} connections between floors {lower_floor} and {upper_floor} at angle {iter_angle}")
-
-    def _check_stair_connection(self, start_x, start_y, start_floor, end_x, end_y, end_floor, grid_distance, num_directions):
-        angle_step = 2 * math.pi / num_directions
-        grid_distance /= self.grid_size
-        for i in range(num_directions):
-            angle = i * angle_step
-            dx = int(round(grid_distance * math.cos(angle)))
-            dy = int(round(grid_distance * math.sin(angle)))
-            
-            if start_x + dx == end_x and start_y + dy == end_y:
-                return True#self._check_path(start_x, start_y, start_floor, end_x, end_y, end_floor)
-        
+                    line = stop[nx_, ny_:] if dy > 0 else stop[nx_, :ny_ + 1][::-1]
+                if not line.any():
+                    return True
         return False
 
-    def _check_path(self, start_x, start_y, start_floor, end_x, end_y, end_floor):
-        dx = end_x - start_x
-        dy = end_y - start_y
-        steps = max(abs(dx), abs(dy))
-        
-        if steps == 0:
-            return True
+    @staticmethod
+    def _calculate_average_position(door_group: List[Tuple[int, int]], floor_index: int,
+                                    candidates: Optional[List[Tuple[int, int]]] = None) -> Tuple[int, int, int]:
+        """The door cell (of candidates, if any) nearest the group's centre, so the exit is a cell of the door."""
+        avg_x = sum(x for x, _ in door_group) / len(door_group)
+        avg_y = sum(y for _, y in door_group) / len(door_group)
+        x, y = min(candidates or door_group, key=lambda p: (p[0] - avg_x) ** 2 + (p[1] - avg_y) ** 2)
+        return (int(x), int(y), floor_index)
 
-        x_step = dx / steps
-        y_step = dy / steps
+    def exit_groups(self, exits: List[Tuple[int, int, int]], stairs_as_exits: bool = True) -> List[Dict[str, Any]]:
+        """All exits as groups of cells: each given exit (door) on its own, and, per floor other than the
+        evacuation level, the stair cells of each stair that reaches an evacuation level (LG 4.2.2.2, 4.4.1.2)."""
+        groups = []
+        seen = set()
+        for e in exits:
+            node = (int(e[0]), int(e[1]), int(e[2]))
+            if node in self and node not in seen:
+                seen.add(node)
+                groups.append({'kind': 'outside', 'label': f"door {node}", 'nodes': np.array([self.index(node)])})
+        if stairs_as_exits:
+            evacuation = set(evacuation_levels(self.floors))
+            labels, count = self._stair_groups()
+            for group in range(1, count + 1):
+                floors = set(np.nonzero((labels == group).any(axis=(1, 2)))[0].tolist())
+                if len(floors) < 2 or not floors & evacuation:
+                    continue
+                for f in sorted(floors - evacuation):
+                    cells = np.argwhere((labels[f] == group) & self.passable[f])
+                    if len(cells):
+                        nodes = (f * self.R + cells[:, 0]) * self.C + cells[:, 1]
+                        groups.append({'kind': 'stairwell', 'label': f"stair {group}", 'floor': f, 'nodes': nodes})
+        return groups
 
-        for i in range(1, steps):
-            x = int(start_x + i * x_step)
-            y = int(start_y + i * y_step)
+    # ---------------------------------------------------------------- routing
 
-            if self.buffered_grids[start_floor][x][y] not in ['stair'] and self.buffered_grids[end_floor][x][y] not in ['stair']:
-                return False
+    def find_path(self, start: Dict[str, int], goals: List[Dict[str, int]]) -> Tuple[List[Tuple[int, int, int]], Dict[str, float]]:
+        """Shortest path (any floors) from start to the nearest goal."""
+        start_node = (start['row'], start['col'], start['floor'])
+        goal_nodes = [(goal['row'], goal['col'], goal['floor']) for goal in goals]
+        if start_node not in self:
+            raise ValueError(f"Start node {start_node} is not in the graph. Cell type: {self.cell_name(start_node)}")
+        invalid_goals = [node for node in goal_nodes if node not in self]
+        if invalid_goals:
+            raise ValueError(f"The following goal nodes are not in the graph: {invalid_goals}")
 
-        return True
+        dist, pred = dijkstra(self.graph, directed=True, indices=[self.index(g) for g in goal_nodes],
+                              min_only=True, return_predecessors=True)[:2]
+        s = self.index(start_node)
+        if not np.isfinite(dist[s]):
+            return [], {}
+        path = self._follow(pred, s)
+        return path, self._calculate_path_lengths(path)
 
-    def _calculate_stair_weight(self, start_node, end_node, height_diff):
-        horizontal_distance = math.sqrt((end_node[0] - start_node[0])**2 + (end_node[1] - start_node[1])**2)
-        actual_horizontal_distance = horizontal_distance * self.grid_size
-        if height_diff > actual_horizontal_distance:
-            actual_horizontal_distance = height_diff #for angles that are too high assume 45 degree stairs
-        actual_distance = math.sqrt(height_diff**2 + (actual_horizontal_distance)**2)
-        # Convert actual distance back to grid units
-        grid_units_distance = actual_distance / self.grid_size
-        #logger.debug(grid_units_distance)
-        return self._get_edge_weight(cell_type='stair', neighbor='stair') * grid_units_distance
+    def _follow(self, pred: np.ndarray, start_index: int) -> List[Tuple[int, int, int]]:
+        path = [start_index]
+        while pred[path[-1]] >= 0:
+            path.append(int(pred[path[-1]]))
+        return [self.node(i) for i in path]
 
-    def _connect_stairs_fallback(self, G, lower_stairs, upper_stairs):
-        for lower_x, lower_y, lower_floor in lower_stairs:
-            for upper_x, upper_y, upper_floor in upper_stairs:
-                node1 = (lower_x, lower_y, lower_floor)
-                node2 = (upper_x, upper_y, upper_floor)
-                if node1 in G and node2 in G:
-                    G.add_edge(node1, node2, weight=self._get_edge_weight('stair'))
-        
+    def exit_field(self, groups: List[Dict[str, Any]], with_second: bool = False):
+        """Per cell: distance (grid cells, own floor only) to the nearest exit's access, the predecessor towards it
+        and that exit's group; with_second also the distance to the nearest other exit (up to
+        SECOND_EXIT_SEARCH_LIMIT, inf beyond)."""
+        key = (tuple(tuple(g['nodes'][:3].tolist()) + (len(g['nodes']),) for g in groups), with_second)
+        if key in self._fields:
+            return self._fields[key]
+        group_of = np.full(self.N, -1, dtype=np.int64)
+        for gi, g in enumerate(groups):
+            group_of[g['nodes']] = gi
+        all_nodes = np.concatenate([g['nodes'] for g in groups]) if groups else np.empty(0, np.int64)
+        if len(all_nodes) == 0:
+            field = (np.full(self.N, np.inf), np.full(self.N, -9999), np.full(self.N, -1), None)
+            self._fields[key] = field
+            return field
+
+        dist, pred, sources = dijkstra(self.planar, directed=True, indices=all_nodes, min_only=True, return_predecessors=True)
+        nearest_group = np.where(sources >= 0, group_of[np.maximum(sources, 0)], -1)
+
+        second = None
+        if with_second:
+            second = np.full(self.N, np.inf)
+            limit = SECOND_EXIT_SEARCH_LIMIT / self.grid_size
+            for gi, g in enumerate(groups):
+                d = dijkstra(self.planar, directed=True, indices=g['nodes'], min_only=True, limit=limit)
+                other = nearest_group != gi
+                np.minimum(second, np.where(other, d, np.inf), out=second)
+        field = (dist, pred, nearest_group, second)
+        self._fields[key] = field
+        return field
+
+    def calculate_escape_routes(self, spaces: List[Dict[str, Any]], exits: List[Tuple[int, int, int]],
+                                stairs_as_exits: bool = True, with_second: bool = True) -> List[Dict[str, Any]]:
+        groups = self.exit_groups(exits, stairs_as_exits)
+        field = self.exit_field(groups, with_second)
+        return [self._route_for_space(space, groups, field) for space in spaces]
+
+    def calculate_escape_route(self, space: Dict[str, Any], exits: List[Tuple[int, int, int]], spaces: List[Dict[str, Any]] = None,
+                               stairs_as_exits: bool = True, with_second: bool = True) -> Dict[str, Any]:
+        return self.calculate_escape_routes([space], exits, stairs_as_exits, with_second)[0]
+
+    def _route_for_space(self, space: Dict[str, Any], groups, field) -> Dict[str, Any]:
+        """The route of a space is the route from its point furthest from any exit; every cell is checked."""
+        dist, pred, nearest_group, second = field
+        floor = space['floor']
+        points = np.asarray(space['points'], dtype=np.int64).reshape(-1, 2)
+        nodes = (floor * self.R + points[:, 0]) * self.C + points[:, 1]
+        in_grid = (points[:, 0] >= 0) & (points[:, 0] < self.R) & (points[:, 1] >= 0) & (points[:, 1] < self.C)
+        nodes = nodes[in_grid]
+        d = dist[nodes]
+        reachable = np.isfinite(d)
+
+        result = {
+            'furthest_point': None,
+            'optimal_exit': None,
+            'optimal_path': None,
+            'grid_type': None,
+            'distance': None,
+            'distance_to_stair': None,
+            'exit_kind': None,
+            'exits_reachable': 0,
+            'second_exit_distance': None,
+            'second_exit_beyond': None,
+            'unreachable_cells': int(len(points) - reachable.sum()),
+            'space_name': space['name'],
+            'space_polygon': space.get('polygon'),
+            'starting_elevation': floor,
+        }
+        if not reachable.any():
+            return result
+
+        furthest = int(nodes[reachable][np.argmax(d[reachable])])
+        path = self._follow(pred, furthest)
+        group = groups[int(nearest_group[furthest])]
+        distance = self._calculate_real_distance(path)
+
+        # Distinct exits that can be reached from the space on its floor, and the worst point for a second one.
+        result['exits_reachable'] = self._exits_in_component(int(nodes[reachable][0]), groups)
+        if second is not None and result['exits_reachable'] >= 2:
+            s = second[nodes[reachable]]
+            if np.isfinite(s).all():
+                result['second_exit_distance'] = float(s.max() * self.grid_size)
+            else:
+                result['second_exit_beyond'] = SECOND_EXIT_SEARCH_LIMIT
+
+        result.update({
+            'furthest_point': self.node(furthest),
+            'optimal_exit': path[-1],
+            'optimal_path': path,
+            'grid_type': [self.cell_name(p) for p in path],
+            'distance': distance,
+            'distance_to_stair': distance if group['kind'] == 'stairwell' else -1,
+            'exit_kind': group['kind'],
+        })
+        return result
+
+    def _planar_components(self):
+        if self._planar_labels is None:
+            self._planar_labels = connected_components(self.planar, directed=False)[1]
+        return self._planar_labels
+
+    def _exits_in_component(self, node_index: int, groups) -> int:
+        """Exits that can be reached at all from this node on its floor."""
+        labels = self._planar_components()
+        component = labels[node_index]
+        return sum(1 for g in groups if (labels[g['nodes']] == component).any())
+
     def _calculate_path_lengths(self, path: List[Tuple[int, int, int]]) -> Dict[str, float]:
         total_length = 0
         floor_lengths = defaultdict(float)
         stairway_distance = 0
-        current_floor = path[0][2]
         found_stair = False
 
         for i in range(len(path) - 1):
             current_node = path[i]
             next_node = path[i + 1]
-            edge_length = self.graph[current_node][next_node]['weight'] * self.grid_size
+            edge_length = self._calculate_real_distance([current_node, next_node])
 
             if current_node[2] == next_node[2]:  # Same floor
                 floor_lengths[f"floor_{current_node[2]}"] += edge_length
@@ -239,12 +460,10 @@ class Pathfinder:
             else:  # Floor change
                 found_stair = True
 
-            if self.grids[current_node[2]][current_node[0]][current_node[1]] == 'stair':
+            if self.codes[current_node[2], current_node[0], current_node[1]] == STAIR:
                 found_stair = True
 
             total_length += edge_length
-        
-        print(total_length)
 
         return {
             "total_length": total_length,
@@ -252,354 +471,77 @@ class Pathfinder:
             "stairway_distance": stairway_distance
         }
 
-    def detect_exits(self) -> List[Tuple[int, int, int]]:
-        exits = []
-        for floor_index, floor in enumerate(self.grids):
-            door_groups = self._group_connected_doors(floor)
-            for door_group in door_groups:
-                if self._is_exit_group(floor, door_group):
-                    exit_coords = self._calculate_average_position(door_group, floor_index)
-                    exits.append(exit_coords)
-        return exits
-
-    def _group_connected_doors(self, floor: List[List[str]]) -> List[List[Tuple[int, int]]]:
-        rows, cols = len(floor), len(floor[0])
-        visited = set()
-        door_groups = []
-
-        def dfs(x, y, group):
-            if (x, y) in visited or not (0 <= x < rows and 0 <= y < cols) or floor[x][y] != 'door':
-                return
-            visited.add((x, y))
-            group.append((x, y))
-            for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-                dfs(x + dx, y + dy, group)
-
-        for i in range(rows):
-            for j in range(cols):
-                if floor[i][j] == 'door' and (i, j) not in visited:
-                    group = []
-                    dfs(i, j, group)
-                    door_groups.append(group)
-
-        return door_groups
-
-    def _is_exit_group(self, floor: List[List[str]], door_group: List[Tuple[int, int]]) -> bool:
-        rows, cols = len(floor), len(floor[0])
-        directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
-
-        for x, y in door_group:
-            for dx, dy in directions:
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < rows and 0 <= ny < cols and floor[nx][ny] not in ['wall', 'door']:
-                    while 0 <= nx < rows and 0 <= ny < cols:
-                        if floor[nx][ny] in ['wall', 'door']:
-                            break
-                        if nx == 0 or nx == rows - 1 or ny == 0 or ny == cols - 1:
-                            return True
-                        nx, ny = nx + dx, ny + dy
-
-        return False
-
-    def _calculate_average_position(self, door_group: List[Tuple[int, int]], floor_index: int) -> Tuple[int, int, int]:
-        avg_x = sum(x for x, _ in door_group) / len(door_group)
-        avg_y = sum(y for _, y in door_group) / len(door_group)
-        return (round(avg_x), round(avg_y), floor_index)
-
-    def find_path(self, start: Dict[str, int], goals: List[Dict[str, int]]) -> Tuple[List[Tuple[int, int, int]], Dict[str, float]]:
-        start_node = (start['row'], start['col'], start['floor'])
-        goal_nodes = [(goal['row'], goal['col'], goal['floor']) for goal in goals]
-        
-        if start_node not in self.graph:
-            raise ValueError(f"Start node {start_node} is not in the graph. Cell type: {self.grids[start['floor']][start['row']][start['col']]}")
-        if not all(node in self.graph for node in goal_nodes):
-            invalid_goals = [node for node in goal_nodes if node not in self.graph]
-            raise ValueError(f"The following goal nodes are not in the graph: {invalid_goals}")
-        
-        # TESTING, ONLY DO LAST TWO FLOORS
-
-
-        def heuristic(a, b):
-            (x1, y1, z1) = a
-            (x2, y2, z2) = b
-            return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 + (abs(z1 - z2)*3) ** 2
-
-        path = None
-        shortest_length = float('inf')
-        for goal in goal_nodes:
-            try:
-                current_path = nx.astar_path(self.graph, start_node, goal, heuristic, weight='weight')
-                current_length = sum(self.graph[current_path[i]][current_path[i+1]]['weight'] for i in range(len(current_path)-1))
-                if current_length < shortest_length:
-                    path = current_path
-                    shortest_length = current_length
-            except nx.NetworkXNoPath:
-                continue
-
-        if not path:
-            return [], {}
-
-        path_lengths = self._calculate_path_lengths(path)
-        return path, path_lengths
-    
-    def calculate_escape_route(self, space: Dict[str, Any], exits: List[Tuple[int, int, int]], spaces: List[Dict[str, Any]]) -> Dict[str, Any]:
-        try:
-            #logger.debug(f"Calculating escape route for space: {space['name']}")
-            candidate_points = self._select_candidate_points(space)
-            #logger.debug(f"Candidate points: {candidate_points}")
-            
-            max_distance = 0
-            furthest_point = None
-            optimal_exit = None
-            optimal_path = None
-            distance_to_stair = -1
-            cpoint = None
-            
-            for point in candidate_points:
-                cpoint = point
-                if point not in self.graph or point[2] < len(self.grids)-200:
-                    #logger.warning(f"Point {point} not in graph for space {space['name']}")
-                    continue
-
-                min_exit_distance = float('inf')
-                best_exit = None
-                best_path = None
-                current_distance_to_stair = -1
-
-                for exit in exits:
-                    exit = (exit[0], exit[1], exit[2])
-                    if exit not in self.graph:
-                        continue
-
-                    try:
-                        path = nx.astar_path(self.graph, point, exit, heuristic=self._heuristic, weight='weight')
-                        distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(len(path)-1))
-                        
-                        #stair_index = next((i for i, node in enumerate(path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), -1)
-                        
-                        # Find index of first node that belongs to a stairway space
-                        stair_index = next((i for i, node in enumerate(path) 
-                                            if self._is_node_in_stairway_space(node, spaces)), -1)  # Pass spaces here
-                        
-                        if stair_index != -1:
-                            stair_distance = sum(self.graph[path[i]][path[i+1]]['weight'] for i in range(stair_index))
-                            current_distance_to_stair = stair_distance if current_distance_to_stair == -1 else min(current_distance_to_stair, stair_distance)
-                        
-                        if distance < min_exit_distance:
-                            min_exit_distance = distance
-                            best_exit = exit
-                            best_path = path
-                    except nx.NetworkXNoPath:
-                        #logger.warning(f"No path found from {point} to exit {exit}")
-                        continue
-
-                if min_exit_distance > max_distance:
-                    max_distance = min_exit_distance
-                    furthest_point = point
-                    optimal_exit = best_exit
-                    optimal_path = best_path
-                    distance_to_stair = current_distance_to_stair
-                    # Calculate real distances based on actual geometric distances
-                    
-            real_max_distance = 0
-            real_distance_to_stair = -1
-            
-            if optimal_path:
-                real_max_distance = self._calculate_real_distance(optimal_path)
-                
-                stair_index = next((i for i, node in enumerate(optimal_path) if self.grids[node[2]][node[0]][node[1]] == 'stair'), -1)
-                if stair_index != -1:
-                    real_distance_to_stair = self._calculate_real_distance(optimal_path[:stair_index+1])
-                    
-            if furthest_point and optimal_exit:
-                grid_type = []
-                for point in optimal_path:
-                    grid_type.append(self.grids[point[2]][point[0]][point[1]])
-                result = {
-                    'furthest_point': furthest_point,
-                    'optimal_exit': optimal_exit,
-                    'optimal_path': optimal_path,
-                    'grid_type': grid_type, 
-                    'distance': real_max_distance,
-                    'distance_to_stair': real_distance_to_stair if distance_to_stair > 0 else -1,
-                    'space_name': space['name'],
-                    'space_polygon': space['polygon'],
-                    'starting_elevation': cpoint[2]
-                }
-            else:
-                result = {
-                    'furthest_point': None,
-                    'optimal_exit': None,
-                    'optimal_path': None,
-                    'path_info': None,
-                    'distance': None,
-                    'distance_to_stair': None,
-                    'space_name': space['name'],
-                    'space_polygon': space['polygon'],
-                    'starting_elevation': cpoint[2]
-                }
-                #logger.debug(f"space polygon: {space['polygon']}")
-
-            #logger.debug(f"Escape route calculation result for space {space['name']}: {result}")
-            return result
-        except Exception as e:
-            logger.error(f"Error in calculate_escape_route for space {space['name']}: {str(e)}")
-            logger.error(traceback.format_exc())
-            raise
-    
-    def _is_node_in_stairway_space(self, node: Tuple[int, int, int], spaces: List[Dict[str, Any]]) -> bool:
-        """Check if a node belongs to a space marked as a stairway."""
-        for space in spaces:
-            if space['is_stairway'] and node[0] in [p[0] for p in space['points']] and node[1] in [p[1] for p in space['points']] and node[2] == space['floor']:
-                return True
-        return False
-    
     def _calculate_real_distance(self, path: List[Tuple[int, int, int]]) -> float:
-        total_distance = 0
-        for i in range(len(path) - 1):
-            x1, y1, z1 = path[i]
-            x2, y2, z2 = path[i+1]
-            
-            # Calculate 3D Euclidean distance
-            dx = (x2 - x1) * self.grid_size
-            dy = (y2 - y1) * self.grid_size
-            dz = (self.floors[z2]['elevation'] - self.floors[z1]['elevation'])
-            
-            distance = math.sqrt(dx**2 + dy**2 + dz**2)
-            total_distance += distance
-        
-        return total_distance
-    
-    def _select_candidate_points(self, space: Dict[str, Any]) -> List[Tuple[int, int, int]]:
-        points = np.array(space['points'])
-        
-        # Calculate the centroid
-        centroid = np.mean(points, axis=0)
-        
-        # Find points furthest from the centroid in each quadrant
-        quadrants = [
-            points[np.logical_and(points[:, 0] >= centroid[0], points[:, 1] >= centroid[1])],
-            points[np.logical_and(points[:, 0] < centroid[0], points[:, 1] >= centroid[1])],
-            points[np.logical_and(points[:, 0] < centroid[0], points[:, 1] < centroid[1])],
-            points[np.logical_and(points[:, 0] >= centroid[0], points[:, 1] < centroid[1])]
-        ]
-        
-        candidates = []
-        for quadrant in quadrants:
-            if len(quadrant) > 0:
-                furthest = max(quadrant, key=lambda p: np.sum((p - centroid)**2))
-                candidates.append((int(furthest[0]), int(furthest[1]), space['floor']))
-        
-        return candidates
-
-    def _heuristic(self, a, b):
-        (x1, y1, z1) = a
-        (x2, y2, z2) = b
-        return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 + abs(z1 - z2) * 3
+        if len(path) < 2:
+            return 0.0
+        p = np.asarray(path, dtype=float)
+        elevation = np.array([f['elevation'] for f in self.floors], dtype=float)
+        dx = np.diff(p[:, 0]) * self.grid_size
+        dy = np.diff(p[:, 1]) * self.grid_size
+        dz = np.diff(elevation[p[:, 2].astype(int)])
+        return float(np.sqrt(dx ** 2 + dy ** 2 + dz ** 2).sum())
 
 
-def find_path(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float], 
+def _door_covers(door: Dict[str, Any], door_group: List[Tuple[int, int]]) -> bool:
+    x0, x1, y0, y1 = door['cells']
+    return any(x0 <= x <= x1 and y0 <= y <= y1 for x, y in door_group)
+
+
+def evacuation_levels(floors: List[Dict[str, Any]]) -> List[int]:
+    """The floor at the building's ±0.00: the one whose storey elevation (relative to the building when the IFC
+    gives it) is nearest 0. Annex 1, 5.6.8: the evacuation level holds the exits to the outside."""
+    if not floors:
+        return []
+
+    def level(f):
+        rel = f.get('relative_elevation')
+        return rel if rel is not None else f.get('elevation', 0)
+    return [min(range(len(floors)), key=lambda i: (abs(level(floors[i])), i))]
+
+
+def find_path(grids, grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float],
               start: Dict[str, int], goals: List[Dict[str, int]], allow_diagonal: bool = False, minimize_cost: bool = True) -> Tuple[List[Tuple[int, int, int]], Dict[str, float]]:
-    try:
-        pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox, allow_diagonal, minimize_cost)
-        return pathfinder.find_path(start, goals)
-    except Exception as e:
-        print(f"Error in find_path: {str(e)}")
-        raise
+    pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox, allow_diagonal, minimize_cost)
+    pathfinder.create_graph()
+    return pathfinder.find_path(start, goals)
 
-def detect_exits(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float]) -> List[Tuple[int, int, int]]:
-    try:
-        pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox)
-        return pathfinder.detect_exits()
-    except Exception as e:
-        print(f"Error in detect_exits: {str(e)}")
-        raise
 
-def calculate_escape_route(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], 
-                           bbox: Dict[str, float], space: Dict[str, Any], exits: List[Tuple[int, int, int]], 
-                           allow_diagonal: bool = False) -> Dict[str, Any]:
-    try:
-        logger.debug(f"Calculating escape route for space: {space['name']}")
-        logger.debug(f"Grid size: {grid_size}, Floors: {floors}, Bbox: {bbox}")
-        logger.debug(f"Exits: {exits}, Allow diagonal: {allow_diagonal}")
-        
-        pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox, allow_diagonal)
-        pathfinder.create_graph()
-        result = pathfinder.calculate_escape_route(space, exits, spaces)
-        
-        logger.debug(f"Escape route calculation result: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"Error in calculate_escape_route: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
-    
-def calculate_escape_routes(grids: List[List[List[str]]], grid_size: float, floors: List[Dict[str, float]], 
-                                              bbox: Dict[str, float], spaces: List[Dict[str, Any]], exits: List[Tuple[int, int, int]], 
-                                              allow_diagonal: bool = False) -> List[Dict[str, Any]]:
-    try: 
-        # Create a single Pathfinder instance
-        pathfinder = Pathfinder(grids, grids, grid_size, floors, bbox, allow_diagonal)
-        pathfinder.create_graph()  # Create the graph once
-        
-        results = []
-        for space in spaces:
-            result = pathfinder.calculate_escape_route(space, exits, spaces)
-            violations = check_escape_route_rules(result, grid_size)
-            result['violations'] = violations
-            results.append(result)
-        
-        return results
-    except Exception as e:
-        logger.error(f"Error in update_spaces_and_calculate_escape_routes: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise
+def detect_exits(grids, grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float],
+                 doors: Optional[List[Dict[str, Any]]] = None, original_grids=None) -> List[Tuple[int, int, int]]:
+    """grids are the grids routes run on (buffered); original_grids, when given, the unbuffered ones doors are read from."""
+    pathfinder = Pathfinder(original_grids if original_grids is not None else grids, grids, grid_size, floors, bbox)
+    return pathfinder.detect_exits(doors)
 
-def check_escape_route_rules(route, grid_size):
+
+def check_escape_route_rules(route, grid_size, require_second_exit: bool = False, occupancy: Optional[float] = None):
+    """LG 2.2.1 (number of exits) and LG 4.4.1.1 (distance to the nearest and to a second exit), day and night.
+
+    A second exit is checked when the occupancy needs two or more exits, or when require_second_exit is set."""
     violations = {
         'general': [],
         'daytime': [],
         'nighttime': []
     }
 
-    max_travel_distances = {
-        'daytime': {
-            'toEvacRoute': 30,
-            'toNearestExit': 45,
-            'toSecondExit': 80
-        },
-        'nighttime': {
-            'toEvacRoute': 20,
-            'toNearestExit': 30,
-            'toSecondExit': 60
-        }
-    }
-    print("Distance to stair:")
-    print(route['distance_to_stair'])
-    print("Distance to exit:")
-    print(route['distance'])
-    for time_of_day in ['daytime', 'nighttime']:
-        if route['distance_to_stair'] and route['distance_to_stair'] > max_travel_distances[time_of_day]['toEvacRoute']:
-            violations[time_of_day].append(f"Distance to evacuation route ({route['distance_to_stair']:.2f}m) exceeds maximum ({max_travel_distances[time_of_day]['toEvacRoute']}m)")
-        
-        if route['distance'] and route['distance'] > max_travel_distances[time_of_day]['toNearestExit']:
-            violations[time_of_day].append(f"Distance to nearest exit ({route['distance']:.2f}m) exceeds maximum ({max_travel_distances[time_of_day]['toNearestExit']}m)")
-
-    # Check dead-end length (if available)
-    if 'dead_end_length' in route and route['dead_end_length'] > 15:
-        violations['daytime'].append(f"Dead-end length ({route['dead_end_length']:.2f}m) exceeds maximum (15m)")
-        violations['nighttime'].append(f"Dead-end length ({route['dead_end_length']:.2f}m) exceeds maximum (15m)")
-
-    # Check stairway distance (if available)
-    if 'stairway_distance' in route:
-        if route['stairway_distance'] < 10:
-            violations['daytime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) is less than minimum (10m)")
-            violations['nighttime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) is less than minimum (10m)")
-        elif route['stairway_distance'] > 60:
-            violations['daytime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) exceeds maximum (60m)")
-            violations['nighttime'].append(f"Stairway distance ({route['stairway_distance']:.2f}m) exceeds maximum (60m)")
-    
-    if not route['distance']:
+    if route.get('distance') is None:
         violations['general'].append("No escape route found!")
-    print(violations)
+        return violations
+
+    needed = max(required_exits(occupancy), 2 if require_second_exit else 1)
+    reached = route.get('exits_reachable') or 1
+    if reached < needed:
+        violations['general'].append(f"Needs {needed} exits (LG 2.2.1), can reach {reached}")
+
+    second = route.get('second_exit_distance')
+    beyond = route.get('second_exit_beyond')
+    for time_of_day in ['daytime', 'nighttime']:
+        limits = MAX_TRAVEL_DISTANCES[time_of_day]
+        if route['distance'] > limits['toNearestExit']:
+            violations[time_of_day].append(f"Distance to nearest exit ({route['distance']:.2f}m) exceeds maximum ({limits['toNearestExit']}m)")
+        if needed >= 2 and reached >= 2:
+            if second is not None and second > limits['toSecondExit']:
+                violations[time_of_day].append(f"Distance to second exit ({second:.2f}m) exceeds maximum ({limits['toSecondExit']}m)")
+            elif second is None and beyond:
+                violations[time_of_day].append(f"Distance to second exit is more than {beyond:.0f}m (maximum {limits['toSecondExit']}m)")
+
     return violations

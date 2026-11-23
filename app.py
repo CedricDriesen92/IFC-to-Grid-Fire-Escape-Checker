@@ -4,8 +4,10 @@ import os
 from typing import List, Dict, Tuple, Any
 from ifc_processing import process_ifc_file, add_escape_routes_to_ifc
 from grid_management import GridManager, validate_grid_data
-from pathfinding import Pathfinder, find_path, detect_exits, calculate_escape_route, calculate_escape_routes, check_escape_route_rules
+from pathfinding import Pathfinder, find_path, detect_exits, check_escape_route_rules, required_exits, NOT_CHECKED
+from grid_codec import pack, to_codes
 import json
+from xml.sax.saxutils import escape
 import webbrowser
 from threading import Timer
 
@@ -13,7 +15,30 @@ from io import BytesIO
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+
+def report_fonts():
+    """A TrueType font with the letters IFC room names use (ų, é, ...), regular and bold; Helvetica, which only
+    covers Latin-1, when none is found."""
+    candidates = [
+        (os.path.join(os.environ.get('WINDIR', 'C:/Windows'), 'Fonts', 'arial.ttf'),
+         os.path.join(os.environ.get('WINDIR', 'C:/Windows'), 'Fonts', 'arialbd.ttf')),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/Library/Fonts/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf"),
+    ]
+    for regular, bold in candidates:
+        if os.path.exists(regular) and os.path.exists(bold):
+            try:
+                if 'ReportSans' not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(TTFont('ReportSans', regular))
+                    pdfmetrics.registerFont(TTFont('ReportSans-Bold', bold))
+                return 'ReportSans', 'ReportSans-Bold'
+            except Exception:
+                continue
+    return 'Helvetica', 'Helvetica-Bold'
 
 import logging
 import sys, traceback
@@ -70,16 +95,15 @@ def process_file() -> tuple[Dict[str, Any], int]:
             grid_size = float(request.form.get('grid_size', 0.1))
             try:
                 result = process_ifc_file(filepath, grid_size)
+                if request.form.get('packed') == '1':
+                    result['grids'] = pack(to_codes(result['grids']))
                 return jsonify(result), 200
             except Exception as e:
                 app.logger.error(f"Error processing file: {str(e)}")
                 traceback.print_exc(file=sys.stdout)
-                return jsonify({'error': 'An error occurred while processing the file'}), 500
+                return jsonify({'error': f'An error occurred while processing the file: {str(e)}'}), 500
     
     return jsonify({'error': 'Invalid file type'}), 400
-
-def allowed_file(filename):
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'ifc', 'json'}
 
 def validate_json_data(data):
     required_keys = ['grids', 'grid_size', 'floors', 'bbox']
@@ -127,11 +151,12 @@ def apply_wall_buffer() -> Tuple[Dict[str, Any], int]:
     data = request.json
     try:
         validate_grid_data(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        packed = bool(data.get('packed'))
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
-        buffered_grids = grid_manager.apply_wall_buffer(int(data['wall_buffer']))
+        buffered_grids = grid_manager.apply_wall_buffer(int(data['wall_buffer']), packed)
         return jsonify({
             'buffered_grids': buffered_grids,
-            'original_grids': grid_manager.get_original_grids()
+            'original_grids': grid_manager.get_original_grids(packed)
         }), 200
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}", exc_info=True)
@@ -148,10 +173,11 @@ def update_cell() -> Tuple[Dict[str, Any], int]:
     try:
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
         grid_manager.update_cell(data['floor'], data['row'], data['col'], data['cell_type'])
-        buffered_grids = grid_manager.apply_wall_buffer(int(data['wall_buffer']))
+        packed = bool(data.get('packed'))
+        buffered_grids = grid_manager.apply_wall_buffer(int(data['wall_buffer']), packed)
         return jsonify({
             'buffered_grids': buffered_grids,
-            'original_grids': grid_manager.get_original_grids()
+            'original_grids': grid_manager.get_original_grids(packed)
         }), 200
     except ValueError as e:
         app.logger.error(f"Validation error: {str(e)}", exc_info=True)
@@ -169,9 +195,10 @@ def batch_update_cells():
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
         for update in data['updates']:
             grid_manager.update_cell(update['floor'], update['row'], update['col'], update['type'])
-        buffered_grids = grid_manager.apply_wall_buffer(int(data['wall_buffer']))
+        packed = bool(data.get('packed'))
+        buffered_grids = grid_manager.apply_wall_buffer(int(data['wall_buffer']), packed)
         return jsonify({
-            'original_grids': grid_manager.get_original_grids(),
+            'original_grids': grid_manager.get_original_grids(packed),
             'buffered_grids': buffered_grids
         }), 200
     except ValueError as e:
@@ -185,7 +212,7 @@ def batch_update_cells():
 def detect_exits_route() -> tuple[Dict[str, Any], int]:
     data = request.json
     try:
-        exits = detect_exits(data['grids'], data['grid_size'], data['floors'], data['bbox'])
+        exits = detect_exits(data['grids'], data['grid_size'], data['floors'], data['bbox'], data.get('doors'), data.get('original_grids'))
         return jsonify({'exits': exits}), 200
     except Exception as e:
         app.logger.error(f"Error detecting exits: {str(e)}")
@@ -197,7 +224,8 @@ def detect_spaces_route() -> tuple[Dict[str, Any], int]:
     try:
         validate_grid_data(data['grids'], data['grid_size'], data['floors'], data['bbox'])
         grid_manager = GridManager(data['grids'], data['grid_size'], data['floors'], data['bbox'])
-        spaces = grid_manager.detect_spaces(data.get('include_empty_tiles', False))
+        spaces = grid_manager.detect_spaces(data.get('include_empty_tiles', False), data.get('ifc_spaces'),
+                                            data.get('space_source', 'ifc'))
         return jsonify({'spaces': spaces}), 200
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}", exc_info=True)
@@ -256,34 +284,58 @@ def get_stair_connections():
             return jsonify({'error': 'Graph not created'}), 400
 
         graph, pathfinder = graphs
-        floor = data['floor']
-
-        connections = []
-        for edge in graph.edges():
-            start_node, end_node = edge
-            if start_node[2] != end_node[2]:  # Different floors
-                connections.append({
-                    'start': start_node,
-                    'end': end_node
-                })
-
+        connections = [{'start': start_node, 'end': end_node} for start_node, end_node, _ in pathfinder.stair_edges]
         return jsonify(connections)
     except Exception as e:
         logger.error(f"Error getting stair connections: {str(e)}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+def graph_missing():
+    return jsonify({'error': 'Create the graph first (/api/create-graph)'}), 400
+
+@app.route('/api/calculate-escape-routes', methods=['POST'])
+def api_calculate_escape_routes():
+    """Escape routes of all spaces at once, from one distance field from the exits."""
+    data = request.json
+    if graphs is None:
+        return graph_missing()
+    try:
+        graph, pathfinder = graphs
+        require_second_exit = bool(data.get('require_second_exit', False))
+        occupancy = data.get('occupancy')
+        occupancy = float(occupancy) if occupancy not in (None, '') else None
+        needed = max(required_exits(occupancy), 2 if require_second_exit else 1)
+        results = pathfinder.calculate_escape_routes(data['spaces'], data['exits'],
+                                                     stairs_as_exits=bool(data.get('stairs_as_exits', True)),
+                                                     with_second=needed >= 2)
+        for result in results:
+            result['violations'] = check_escape_route_rules(result, pathfinder.grid_size, require_second_exit, occupancy)
+        return jsonify({'escape_routes': results, 'required_exits': needed, 'not_checked': NOT_CHECKED})
+    except (ValueError, KeyError) as e:
+        logger.error(f"Validation error: {str(e)}", exc_info=True)
+        return jsonify({'error': f'Invalid input data: {str(e)}'}), 400
+    except Exception as e:
+        logger.error(f"Error calculating escape routes: {str(e)}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/calculate-escape-route', methods=['POST'])
 def api_calculate_escape_route():
     data = request.json
+    if graphs is None:
+        return graph_missing()
     try:
         graph, pathfinder = graphs
-        
+
         space = data['space']
         exits = data['exits']
         spaces = data['spaces']
         
-        result = pathfinder.calculate_escape_route(space, exits, spaces)
-        violations = check_escape_route_rules(result, pathfinder.grid_size)
+        occupancy = data.get('occupancy')
+        occupancy = float(occupancy) if occupancy not in (None, '') else None
+        require_second_exit = bool(data.get('require_second_exit', False))
+        needed = max(required_exits(occupancy), 2 if require_second_exit else 1)
+        result = pathfinder.calculate_escape_route(space, exits, spaces, bool(data.get('stairs_as_exits', True)), needed >= 2)
+        violations = check_escape_route_rules(result, pathfinder.grid_size, require_second_exit, occupancy)
         result['violations'] = violations
         
         return jsonify({'escape_route': result})
@@ -319,7 +371,7 @@ def api_update_ifc_with_routes():
             
             output_dir = os.path.join(app.config['UPLOAD_FOLDER'], "ifc_output")
             os.makedirs(output_dir, exist_ok=True)
-            new_file = os.path.join(output_dir, filename.split(".")[0] + "_withroutes.ifc")
+            new_file = os.path.join(output_dir, os.path.splitext(filename)[0] + "_withroutes.ifc")
             
             logger.info(f"Processing IFC file: {filepath}")
             logger.info(f"Output file: {new_file}")
@@ -347,82 +399,105 @@ def generate_pdf_report():
     escape_routes = data['escape_routes']
     grid_size = data['grid_size']
     floors = data['floors']
-    filename = data['filename'].split(".", -1)[0]
+    filename = os.path.splitext(data['filename'])[0]
+    require_second_exit = bool(data.get('require_second_exit', False))
+    occupancy = data.get('occupancy')
+    occupancy = float(occupancy) if occupancy not in (None, '') else None
+    needed = max(required_exits(occupancy), 2 if require_second_exit else 1)
+    require_second_exit = needed >= 2
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
+    font, bold_font = report_fonts()
+    for style in styles.byName.values():
+        if hasattr(style, 'fontName'):
+            style.fontName = bold_font if 'Bold' in style.fontName else font
     elements = []
 
     # Title
     elements.append(Paragraph("Escape Routes Report", styles['Title']))
-    elements.append(Paragraph(f"File: <u>{filename}.ifc</u>", styles['Heading2']))
+    elements.append(Paragraph(f"File: <u>{escape(filename)}.ifc</u>", styles['Heading2']))
+    elements.append(Paragraph("Checked against KB 7 July 1994, annex 2/1 (low buildings): LG 2.2.1 number of exits, "
+                              "LG 4.4.1.1 distances to the nearest and a second exit, LG 4.4.1.2 exits "
+                              "(doors to the open air on the evacuation level, stairwells on other floors).", styles['BodyText']))
+    occupancy_text = f"{occupancy:.0f} persons" if occupancy is not None else "not given"
+    elements.append(Paragraph(f"Occupancy: {occupancy_text}; exits required per compartment: {needed}.", styles['BodyText']))
     elements.append(Spacer(1, 12))
 
     # Violations summary
     elements.append(Paragraph("Routes with Violations:", styles['Heading2']))
     for route in escape_routes:
         if any(route['violations'].values()):
-            elements.append(Paragraph(f"Space: {route['space_name']}", styles['Heading3']))
+            elements.append(Paragraph(f"Space: {escape(route['space_name'])}", styles['Heading3']))
             for violation_type, violations in route['violations'].items():
                 if violations:
                     elements.append(Paragraph(f"{violation_type.capitalize()}:", styles['Heading4']))
                     for violation in violations:
-                        elements.append(Paragraph(f"- {violation}", styles['BodyText']))
+                        elements.append(Paragraph(f"- {escape(violation)}", styles['BodyText']))
             elements.append(Spacer(1, 12))
 
     # Table of all routes
     elements.append(Paragraph("Overview of All Routes:", styles['Heading2']))
     
     for floor_index, floor in enumerate(floors):
-        elements.append(Paragraph(f"Floor {floor_index+1}/{len(floors)}: '{floor['name']}'", styles['Heading3']))
-        
-        table_data = [["Space", "Total Length (m)", "Length to Stairs (m)", "Violations"]]
-        for route in escape_routes:
-            logger.debug(route['starting_elevation'])
-            if int(route['starting_elevation']) == floor_index:
-                total_length = route['distance'] if route['distance'] is not None else "N/A"
-                length_to_stairs = route['distance_to_stair'] if (route['distance_to_stair'] is not None and route['distance_to_stair'] > 0) else "N/A"
-                violations = ", ".join([v for vtype in route['violations'].values() for v in vtype]) if (route['violations'].items() is not None) else "None"
-                table_data.append([
-                    route['space_name'],
-                    f"{total_length:.2f}" if isinstance(total_length, float) else total_length,
-                    f"{length_to_stairs:.2f}" if isinstance(length_to_stairs, float) else length_to_stairs,
-                    violations
-                ])
+        elements.append(Paragraph(f"Floor {floor_index+1}/{len(floors)}: '{escape(str(floor.get('name')))}'", styles['Heading3']))
+
+        header = ["Space", "To Exit (m)", "Exit"]
+        if require_second_exit:
+            header.append("Second Exit (m)")
+        table_data = [header + ["Violations"]]
+        floor_routes = [route for route in escape_routes if int(route['starting_elevation']) == floor_index]
+        for route in floor_routes:
+            total_length = route['distance'] if route['distance'] is not None else "N/A"
+            length_to_stairs = route.get('exit_kind') or "N/A"
+            violations = ", ".join([v for vtype in route['violations'].values() for v in vtype]) or "None"
+            row = [
+                route['space_name'],
+                f"{total_length:.2f}" if isinstance(total_length, (int, float)) else total_length,
+                f"{length_to_stairs:.2f}" if isinstance(length_to_stairs, (int, float)) else length_to_stairs,
+            ]
+            if require_second_exit:
+                second = route.get('second_exit_distance')
+                row.append(f"{second:.2f}" if isinstance(second, (int, float)) else "N/A")
+            table_data.append(row + [violations])
         
         if len(table_data) > 1:
-            table = Table(table_data)
+            # Paragraph cells wrap long room names and violation texts inside fixed column widths.
+            cell = ParagraphStyle('cell', parent=styles['BodyText'], fontName=font, fontSize=8, leading=10)
+            head = ParagraphStyle('head', parent=cell, fontName=bold_font, textColor=colors.whitesmoke)
+            table_data = [[Paragraph(escape(str(v)), head if r == 0 else cell) for v in row] for r, row in enumerate(table_data)]
+            widths = [130, 50, 55] + ([55] if require_second_exit else [])
+            widths.append(doc.width - sum(widths))
+            table = Table(table_data, colWidths=widths, repeatRows=1)
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, 0), 14),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
                 ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
                 ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-                ('FONTSIZE', (0, 1), (-1, -1), 12),
-                ('TOPPADDING', (0, 1), (-1, -1), 6),
-                ('BOTTOMPADDING', (0, 1), (-1, -1), 6),
-                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ('TOPPADDING', (0, 1), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 3),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
             ]))
 
-            # Color rows based on violations
-            for i, route in enumerate(escape_routes):
-                if route['starting_elevation'] == floor_index:
-                    if route['violations']['general'] or route['violations']['daytime']:
-                        table.setStyle(TableStyle([('BACKGROUND', (0, i+1), (-1, i+1), colors.pink)]))
-                    elif route['violations']['nighttime']:
-                        table.setStyle(TableStyle([('BACKGROUND', (0, i+1), (-1, i+1), colors.yellow)]))
+            # Color rows based on violations (row i + 1 of this floor's table)
+            for i, route in enumerate(floor_routes):
+                if route['violations']['general'] or route['violations']['daytime']:
+                    table.setStyle(TableStyle([('BACKGROUND', (0, i+1), (-1, i+1), colors.pink)]))
+                elif route['violations']['nighttime']:
+                    table.setStyle(TableStyle([('BACKGROUND', (0, i+1), (-1, i+1), colors.yellow)]))
 
             elements.append(table)
             elements.append(Spacer(1, 12))
         else:
             elements.append(Paragraph("No routes on this floor.", styles['BodyText']))
             elements.append(Spacer(1, 12))
+
+    elements.append(Paragraph("Not checked by this tool:", styles['Heading2']))
+    for item in NOT_CHECKED:
+        elements.append(Paragraph(f"- {escape(item)}", styles['BodyText']))
 
     doc.build(elements)
     buffer.seek(0)

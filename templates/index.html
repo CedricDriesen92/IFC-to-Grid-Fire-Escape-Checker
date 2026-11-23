@@ -158,6 +158,17 @@
                     <label for="include-empty-tiles" class="text-sm">Include empty tiles in spaces</label>
                 </div>
                 <div class="flex items-center space-x-2">
+                    <label for="space-source" class="text-sm">Spaces:</label>
+                    <select id="space-source" class="bg-dark-300 rounded px-2 py-1 text-sm">
+                        <option value="ifc" selected>IfcSpaces (detected where none)</option>
+                        <option value="detected">Detected from the grid</option>
+                    </select>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <label for="occupancy" class="text-sm" title="Maximum occupancy of a compartment, for the number of exits (LG 2.2.1)">Occupancy:</label>
+                    <input type="number" id="occupancy" min="0" step="1" placeholder="persons" class="bg-dark-300 rounded px-2 py-1 text-sm w-24">
+                </div>
+                <div class="flex items-center space-x-2">
                     <input type="checkbox" id="show-buffer" class="form-checkbox">
                     <label for="show-buffer" class="text-sm">Show wall buffer</label>
                 </div>
@@ -173,6 +184,10 @@
                 <div class="flex items-center space-x-2">
                     <input type="checkbox" id="minimize-cost" name="minimize-cost" class="form-checkbox">
                     <label for="minimize-cost" class="text-sm">Minimize Cost</label>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <input type="checkbox" id="require-second-exit" name="require-second-exit" class="form-checkbox">
+                    <label for="require-second-exit" class="text-sm" title="Compartments for 100 or more occupants need two exits">Require Second Exit</label>
                 </div>
                 <div class="flex items-center space-x-2">
                     <label for="max-stair-distance" class="text-sm">Max Stair/Exit Distance:</label>
