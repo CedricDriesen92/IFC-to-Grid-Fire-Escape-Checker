@@ -130,15 +130,8 @@ class GridManager:
         straight ones) are blocked, and of the rest only cells in a free 2 x 2 block are kept. Door cells are
         judged the same way, so the opening itself is measured: a door too narrow to pass is blocked."""
         try:
-            b = int(buffer_distance)
             for floor, grid in enumerate(self.codes):
-                buffered = grid.copy()
-                if b > 0:
-                    blocked = self._dilate_disk(grid == WALL, b - 1)
-                    free = ~blocked & ((grid == FLOOR) | (grid == STAIR) | (grid == DOOR))
-                    narrow = blocked | (free & ~self._in_free_2x2(free))
-                    buffered[narrow & (grid != WALL)] = WALLA
-                self.buffered_codes[floor] = buffered
+                self.buffered_codes[floor] = buffer_floor(grid, buffer_distance)
             return encode(self.buffered_codes, packed)
         except Exception as e:
             logger.error(f"Error in apply_wall_buffer: {str(e)}", exc_info=True)
@@ -233,6 +226,13 @@ class GridManager:
                 "area": len(cells) * self.grid_size ** 2,
                 "is_stairway": bool((values == STAIR).any()) or self._check_if_stairway(grid == STAIR, footprint),
                 "source": "ifc",
+                "guid": ifc_space.get('guid'),
+                "use": ifc_space.get('use'),
+                "use_source": ifc_space.get('use_source'),
+                "occupancy": ifc_space.get('occupancy'),
+                "fire_exit": ifc_space.get('fire_exit'),
+                # the whole footprint, for a space that is itself an exit (stairwell, evacuation route)
+                **({"cells": footprint} if ifc_space.get('fire_exit') else {}),
             })
         return spaces
 
@@ -321,6 +321,18 @@ class GridManager:
         # Convert grid coordinates to world coordinates
         min_x, min_y = self.bbox.get('min_x', 0.0), self.bbox.get('min_y', 0.0)
         return [(y * self.grid_size + min_x, x * self.grid_size + min_y) for x, y in border_points]
+
+
+def buffer_floor(grid: np.ndarray, buffer_distance: int) -> np.ndarray:
+    """One floor of GridManager.apply_wall_buffer: cells that stay narrower than 2 * buffer cells become 'walla'."""
+    buffered = grid.copy()
+    b = int(buffer_distance)
+    if b > 0:
+        blocked = GridManager._dilate_disk(grid == WALL, b - 1)
+        free = ~blocked & ((grid == FLOOR) | (grid == STAIR) | (grid == DOOR))
+        narrow = blocked | (free & ~GridManager._in_free_2x2(free))
+        buffered[narrow & (grid != WALL)] = WALLA
+    return buffered
 
 
 def runs_to_cells(runs: List[List[int]], shape: Tuple[int, int]) -> np.ndarray:

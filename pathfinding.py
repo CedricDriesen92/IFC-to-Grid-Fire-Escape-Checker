@@ -17,6 +17,7 @@ from scipy.spatial import cKDTree
 import logging
 
 from grid_codec import NAMES, DOOR, STAIR, PASSABLE, to_codes
+import i18n
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -40,14 +41,12 @@ MAX_TRAVEL_DISTANCES = {
 SECOND_EXIT_SEARCH_LIMIT = 100.0
 
 # What the grid cannot show; reported with the results so a pass is not read as full compliance.
-NOT_CHECKED = [
-    "LG 4.4.1.1: distance to the evacuation route connecting the exits (30 m day / 20 m night): evacuation routes are not identified on the grid",
-    "LG 4.4.1.1: dead ends of at most 15 m",
-    "LG 4.4.1.1 and annex 1, 5.6.7: required useful width per occupant (1 cm per person on routes and doors, in units of 0.60 m); only the 0.80 m minimum is checked, through the wall buffer",
-    "LG 4.4.1.2: protected evacuation routes and external stairs as exits, and whether stairwells are enclosed (LG 4.2)",
-    "LG 2.2.2: exits in opposite zones of the compartment",
-    "Compartments: every space is checked on its own; parkings (LG 5.2) are not excluded",
-]
+NOT_CHECKED = i18n.not_checked('en')
+
+# Path smoothing: candidates (cells furthest by grid distance, at least 1 m apart) whose route is straightened to
+# true lines of sight.
+SMOOTHING_CANDIDATES = 8
+SMOOTHING_POOL = 400
 
 _NAME_ARRAY = np.array(NAMES, dtype=object)
 
@@ -86,6 +85,8 @@ class Pathfinder:
         self._components = None
         self._planar_labels = None
         self._fields = {}
+        self._loose = None        # planar graph of the grid without the wall buffer, for diagnoses
+        self._loose_fields = {}
 
     # ---------------------------------------------------------------- nodes
 
@@ -109,12 +110,31 @@ class Pathfinder:
     # ---------------------------------------------------------------- graph
 
     def create_graph(self):
-        idx = np.arange(self.N, dtype=np.int64).reshape(self.F, self.R, self.C)
         P = self.passable
+        self.planar = self._planar_graph(P)
+        self.stair_edges = self._connect_stairs()
+        if self.stair_edges:
+            sa = np.array([self.index(u) for u, _, _ in self.stair_edges])
+            sb = np.array([self.index(v) for _, v, _ in self.stair_edges])
+            sw = np.array([w for _, _, w in self.stair_edges])
+            stairs = sparse.csr_matrix((np.concatenate([sw, sw]), (np.concatenate([sa, sb]), np.concatenate([sb, sa]))),
+                                       shape=(self.N, self.N))
+            self.graph = (self.planar + stairs).tocsr()
+        else:
+            self.graph = self.planar
+        self._components = None
+        self._planar_labels = None
+        self._fields = {}
+        self._loose = None
+        self._loose_fields = {}
+        return self.graph
+
+    def _planar_graph(self, P: np.ndarray):
+        """Edges between neighbouring passable cells on each floor (both directions), as a CSR matrix."""
+        idx = np.arange(self.N, dtype=np.int64).reshape(self.F, self.R, self.C)
         directions = [(0, 1, 1.0), (1, 0, 1.0)]
         if self.allow_diagonal:
             directions += [(1, 1, math.sqrt(2)), (1, -1, math.sqrt(2))]
-
         sources, targets, weights = [], [], []
         for dx, dy, base in directions:
             xa, xb = slice(0, self.R - dx), slice(dx, self.R)
@@ -135,23 +155,8 @@ class Pathfinder:
         a = np.concatenate(sources)
         b = np.concatenate(targets)
         w = np.concatenate(weights)
-        self.planar = sparse.csr_matrix((np.concatenate([w, w]), (np.concatenate([a, b]), np.concatenate([b, a]))),
-                                        shape=(self.N, self.N))
-
-        self.stair_edges = self._connect_stairs()
-        if self.stair_edges:
-            sa = np.array([self.index(u) for u, _, _ in self.stair_edges])
-            sb = np.array([self.index(v) for _, v, _ in self.stair_edges])
-            sw = np.array([w for _, _, w in self.stair_edges])
-            stairs = sparse.csr_matrix((np.concatenate([sw, sw]), (np.concatenate([sa, sb]), np.concatenate([sb, sa]))),
-                                       shape=(self.N, self.N))
-            self.graph = (self.planar + stairs).tocsr()
-        else:
-            self.graph = self.planar
-        self._components = None
-        self._planar_labels = None
-        self._fields = {}
-        return self.graph
+        return sparse.csr_matrix((np.concatenate([w, w]), (np.concatenate([a, b]), np.concatenate([b, a]))),
+                                 shape=(self.N, self.N))
 
     def _stair_groups(self):
         """3D groups of stair cells: 4-connected on a floor and joined to the cell straight above or below."""
@@ -285,9 +290,16 @@ class Pathfinder:
         x, y = min(candidates or door_group, key=lambda p: (p[0] - avg_x) ** 2 + (p[1] - avg_y) ** 2)
         return (int(x), int(y), floor_index)
 
-    def exit_groups(self, exits: List[Tuple[int, int, int]], stairs_as_exits: bool = True) -> List[Dict[str, Any]]:
-        """All exits as groups of cells: each given exit (door) on its own, and, per floor other than the
-        evacuation level, the stair cells of each stair that reaches an evacuation level (LG 4.2.2.2, 4.4.1.2)."""
+    def exit_groups(self, exits: List[Tuple[int, int, int]], stairs_as_exits: bool = True,
+                    doors: Optional[List[Dict[str, Any]]] = None, spaces: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        """All exits of LG 4.4.1.2 as groups of cells:
+        - each given exit (a door to the open air on the evacuation level, or a goal placed by hand);
+        - on floors other than the evacuation level, the stair cells of each stair that reaches an evacuation level
+          (LG 4.2.2.2);
+        - spaces with FireExit TRUE: a stairwell (holding stair cells) on floors other than the evacuation level, an
+          evacuation route (no stair) only on the evacuation level;
+        - doors with FireExit TRUE next to such a stair or space, on the floors where those count: the access to the
+          stairwell or route itself."""
         groups = []
         seen = set()
         for e in exits:
@@ -295,18 +307,56 @@ class Pathfinder:
             if node in self and node not in seen:
                 seen.add(node)
                 groups.append({'kind': 'outside', 'label': f"door {node}", 'nodes': np.array([self.index(node)])})
-        if stairs_as_exits:
-            evacuation = set(evacuation_levels(self.floors))
-            labels, count = self._stair_groups()
-            for group in range(1, count + 1):
-                floors = set(np.nonzero((labels == group).any(axis=(1, 2)))[0].tolist())
-                if len(floors) < 2 or not floors & evacuation:
-                    continue
+        evacuation = set(evacuation_levels(self.floors))
+        labels, count = self._stair_groups()
+        qualifying = np.zeros(self.codes.shape, bool)  # stair cells of stairs that reach an evacuation level
+        for group in range(1, count + 1):
+            floors = set(np.nonzero((labels == group).any(axis=(1, 2)))[0].tolist())
+            if len(floors) < 2 or not floors & evacuation:
+                continue
+            qualifying |= labels == group
+            if stairs_as_exits:
                 for f in sorted(floors - evacuation):
                     cells = np.argwhere((labels[f] == group) & self.passable[f])
                     if len(cells):
                         nodes = (f * self.R + cells[:, 0]) * self.C + cells[:, 1]
                         groups.append({'kind': 'stairwell', 'label': f"stair {group}", 'floor': f, 'nodes': nodes})
+
+        exit_space_cells = np.zeros(self.codes.shape, bool)
+        for space in spaces or []:
+            if not space.get('fire_exit'):
+                continue
+            f = space['floor']
+            pts = np.asarray(space.get('cells') or space['points'], dtype=np.int64).reshape(-1, 2)
+            if len(pts) == 0:
+                continue
+            has_stair = bool(qualifying[f, pts[:, 0], pts[:, 1]].any() or space.get('is_stairway'))
+            if (f in evacuation) == has_stair:
+                continue  # a stairwell is an exit above or below the evacuation level, an evacuation route on it
+            exit_space_cells[f, pts[:, 0], pts[:, 1]] = True
+            ok = self.passable[f, pts[:, 0], pts[:, 1]]
+            if ok.any():
+                nodes = (f * self.R + pts[ok, 0]) * self.C + pts[ok, 1]
+                groups.append({'kind': 'stairwell' if has_stair else 'evacuation route', 'label': space.get('name', 'space'),
+                               'floor': f, 'nodes': nodes})
+
+        stair_access = qualifying.copy()
+        for f in evacuation:
+            stair_access[f] = False  # on the evacuation level the way out is a door outside, not the stair
+        near = ndimage.binary_dilation(stair_access | exit_space_cells, structure=np.ones((1, 7, 7), bool))
+        for door in doors or []:
+            if not door.get('fire_exit') or door.get('is_external'):
+                continue
+            f = door.get('floor')
+            x0, x1, y0, y1 = door['cells']
+            if f is None or not 0 <= f < self.F or x1 < x0 or y1 < y0:
+                continue
+            box = (slice(max(x0, 0), x1 + 1), slice(max(y0, 0), y1 + 1))
+            cells = np.argwhere((self.codes[f][box] == DOOR) & self.passable[f][box]) + (box[0].start, box[1].start)
+            if len(cells) == 0 or not near[f, cells[:, 0], cells[:, 1]].any():
+                continue
+            nodes = (f * self.R + cells[:, 0]) * self.C + cells[:, 1]
+            groups.append({'kind': 'stairwell door', 'label': door.get('name') or 'door', 'floor': f, 'nodes': nodes})
         return groups
 
     # ---------------------------------------------------------------- routing
@@ -367,8 +417,9 @@ class Pathfinder:
         return field
 
     def calculate_escape_routes(self, spaces: List[Dict[str, Any]], exits: List[Tuple[int, int, int]],
-                                stairs_as_exits: bool = True, with_second: bool = True) -> List[Dict[str, Any]]:
-        groups = self.exit_groups(exits, stairs_as_exits)
+                                stairs_as_exits: bool = True, with_second: bool = True,
+                                doors: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        groups = self.exit_groups(exits, stairs_as_exits, doors, spaces)
         field = self.exit_field(groups, with_second)
         return [self._route_for_space(space, groups, field) for space in spaces]
 
@@ -404,12 +455,33 @@ class Pathfinder:
             'starting_elevation': floor,
         }
         if not reachable.any():
+            result['diagnosis'] = self._diagnose(nodes, floor, groups)
             return result
 
-        furthest = int(nodes[reachable][np.argmax(d[reachable])])
-        path = self._follow(pred, furthest)
+        # Grid steps overstate walked lengths (up to 8 % with diagonals): straighten the routes of the cells
+        # furthest by grid distance and keep the longest straightened one.
+        # Straightening never lengthens a route, so a cell whose grid distance is below the best straightened length
+        # so far cannot win: candidates are taken by grid distance until that point, at most SMOOTHING_CANDIDATES.
+        order = np.argsort(d[reachable])[::-1][:SMOOTHING_POOL]
+        pool = nodes[reachable][order]
+        pool_d = d[reachable][order] * self.grid_size
+        chosen = []
+        best = None
+        for candidate, grid_length in zip(pool, pool_d):
+            if best is not None and grid_length <= best[0] + 1e-9:
+                break
+            cx, cy, _ = self.node(int(candidate))
+            if any((cx - x) ** 2 + (cy - y) ** 2 < (1.0 / self.grid_size) ** 2 for x, y in chosen):
+                continue
+            chosen.append((cx, cy))
+            straight = self.smooth_path(self._follow(pred, int(candidate)))
+            length = self._calculate_real_distance(straight)
+            if best is None or length > best[0]:
+                best = (length, int(candidate), straight)
+            if len(chosen) >= SMOOTHING_CANDIDATES:
+                break
+        distance, furthest, path = best
         group = groups[int(nearest_group[furthest])]
-        distance = self._calculate_real_distance(path)
 
         # Distinct exits that can be reached from the space on its floor, and the worst point for a second one.
         result['exits_reachable'] = self._exits_in_component(int(nodes[reachable][0]), groups)
@@ -430,6 +502,84 @@ class Pathfinder:
             'exit_kind': group['kind'],
         })
         return result
+
+    def _visible(self, f: int, a, b) -> bool:
+        """A straight walk from cell a to cell b on floor f stays on passable cells, checked along the centre line and
+        a quarter cell to each side (so it never slips between two blocked cells touching at a corner)."""
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(dx, dy)
+        if length == 0:
+            return True
+        steps = int(length * 4) + 1
+        t = np.arange(steps + 1) / steps
+        nx_, ny_ = -dy / length * 0.25, dx / length * 0.25
+        xs = a[0] + 0.5 + dx * t
+        ys = a[1] + 0.5 + dy * t
+        cx = np.floor(np.concatenate([xs, xs + nx_, xs - nx_])).astype(np.int64)
+        cy = np.floor(np.concatenate([ys, ys + ny_, ys - ny_])).astype(np.int64)
+        if cx.min() < 0 or cy.min() < 0 or cx.max() >= self.R or cy.max() >= self.C:
+            return False
+        return bool(self.passable[f][cx, cy].all())
+
+    def smooth_path(self, path: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+        """String pulling: keep only the turning points, each the furthest point of the path still in a straight line
+        of sight (galloping search). Floor changes are kept as they are."""
+        if len(path) <= 2:
+            return list(path)
+        out = [path[0]]
+        i = 0
+        n = len(path)
+        while i < n - 1:
+            f = path[i][2]
+            last = i + 1
+            while last + 1 < n and path[last + 1][2] == f:
+                last += 1
+            if path[last][2] != f or last == i + 1:
+                out.append(path[i + 1])
+                i += 1
+                continue
+            lo, step = i + 1, 1
+            while lo + step <= last and self._visible(f, path[i], path[lo + step]):
+                lo += step
+                step *= 2
+            hi = min(lo + step, last + 1)
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                if self._visible(f, path[i], path[mid]):
+                    lo = mid
+                else:
+                    hi = mid
+            out.append(path[lo])
+            i = lo
+        return out
+
+    def _diagnose(self, nodes: np.ndarray, floor: int, groups) -> Dict[str, Any]:
+        """Why a space has no route: no exit on its floor, exits only reachable through cells the wall buffer closes
+        (with the first such cell, the bottleneck), or walled off."""
+        on_floor = [g for g in groups if (g['nodes'] // (self.R * self.C) == floor).any()]
+        if not on_floor:
+            return {'code': 'no_exit_on_floor', 'cell': None}
+        loose_passable = np.isin(self.original_codes, PASSABLE)
+        if self._loose is None:
+            self._loose = self._planar_graph(loose_passable)
+        key = tuple(len(g['nodes']) for g in on_floor) + (floor,)
+        if key not in self._loose_fields:
+            sources = np.concatenate([g['nodes'] for g in on_floor])
+            sources = sources[loose_passable.reshape(-1)[sources]]
+            self._loose_fields[key] = dijkstra(self._loose, directed=True, indices=sources, min_only=True,
+                                               return_predecessors=True)[:2] if len(sources) else None
+        field = self._loose_fields[key]
+        if field is None:
+            return {'code': 'walled_off', 'cell': None}
+        dist, pred = field
+        reach = nodes[np.isfinite(dist[nodes])]
+        if len(reach) == 0:
+            return {'code': 'walled_off', 'cell': None}
+        path = [int(reach[0])]
+        while pred[path[-1]] >= 0:
+            path.append(int(pred[path[-1]]))
+        blocked = [i for i in path if not self.passable.reshape(-1)[i]]
+        return {'code': 'narrow', 'cell': self.node(blocked[0]) if blocked else None}
 
     def _planar_components(self):
         if self._planar_labels is None:
@@ -513,10 +663,12 @@ def detect_exits(grids, grid_size: float, floors: List[Dict[str, float]], bbox: 
     return pathfinder.detect_exits(doors)
 
 
-def check_escape_route_rules(route, grid_size, require_second_exit: bool = False, occupancy: Optional[float] = None):
-    """LG 2.2.1 (number of exits) and LG 4.4.1.1 (distance to the nearest and to a second exit), day and night.
+def check_escape_route_rules(route, grid_size, require_second_exit: bool = False, occupancy: Optional[float] = None,
+                             use: Optional[str] = None, lang: str = 'en', needed: Optional[int] = None):
+    """LG 2.2.1 (number of exits) and LG 4.4.1.1 (distance to the nearest and to a second exit).
 
-    A second exit is checked when the occupancy needs two or more exits, or when require_second_exit is set."""
+    use: 'day' or 'night' checks that use's limits only; unknown checks both. needed overrides the number of exits
+    from occupancy (a compartment's). A second exit is checked when two or more exits are needed."""
     violations = {
         'general': [],
         'daytime': [],
@@ -524,24 +676,30 @@ def check_escape_route_rules(route, grid_size, require_second_exit: bool = False
     }
 
     if route.get('distance') is None:
-        violations['general'].append("No escape route found!")
+        violations['general'].append(i18n.t(lang, 'no_route'))
+        diagnosis = route.get('diagnosis') or {}
+        if diagnosis.get('code'):
+            violations['general'].append(i18n.t(lang, 'diag_' + diagnosis['code']))
         return violations
 
-    needed = max(required_exits(occupancy), 2 if require_second_exit else 1)
+    if needed is None:
+        needed = required_exits(occupancy)
+    needed = max(needed, 2 if require_second_exit else 1)
     reached = route.get('exits_reachable') or 1
     if reached < needed:
-        violations['general'].append(f"Needs {needed} exits (LG 2.2.1), can reach {reached}")
+        violations['general'].append(i18n.t(lang, 'needs_exits', needed=needed, reached=reached))
 
     second = route.get('second_exit_distance')
     beyond = route.get('second_exit_beyond')
-    for time_of_day in ['daytime', 'nighttime']:
+    times = {'day': ['daytime'], 'night': ['nighttime']}.get(use, ['daytime', 'nighttime'])
+    for time_of_day in times:
         limits = MAX_TRAVEL_DISTANCES[time_of_day]
         if route['distance'] > limits['toNearestExit']:
-            violations[time_of_day].append(f"Distance to nearest exit ({route['distance']:.2f}m) exceeds maximum ({limits['toNearestExit']}m)")
+            violations[time_of_day].append(i18n.t(lang, 'nearest_exit', distance=route['distance'], limit=limits['toNearestExit']))
         if needed >= 2 and reached >= 2:
             if second is not None and second > limits['toSecondExit']:
-                violations[time_of_day].append(f"Distance to second exit ({second:.2f}m) exceeds maximum ({limits['toSecondExit']}m)")
+                violations[time_of_day].append(i18n.t(lang, 'second_exit', distance=second, limit=limits['toSecondExit']))
             elif second is None and beyond:
-                violations[time_of_day].append(f"Distance to second exit is more than {beyond:.0f}m (maximum {limits['toSecondExit']}m)")
+                violations[time_of_day].append(i18n.t(lang, 'second_exit_beyond', beyond=beyond, limit=limits['toSecondExit']))
 
     return violations

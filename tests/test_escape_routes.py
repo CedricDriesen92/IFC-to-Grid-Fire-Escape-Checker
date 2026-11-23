@@ -190,11 +190,50 @@ def test_furthest_point_is_exact_and_second_exit_matches_brute_force():
     per_exit = [dijkstra(pf.graph, indices=pf.index(e)) for e in exits]
     idx = [pf.index((r, c, 0)) for r, c in points]
     both = np.sort(np.stack([d[idx] for d in per_exit]), axis=0)
-    assert route['distance'] == pytest.approx(both[0].max() * GS, rel=1e-6)
+    # the route is straightened: at most the grid length, and at least 1/1.083 of it (octile overestimate)
+    assert both[0].max() * GS / 1.0825 <= route['distance'] <= both[0].max() * GS + 1e-9
     assert route['second_exit_distance'] == pytest.approx(both[1].max() * GS, rel=1e-6)
     assert route['exits_reachable'] == 2
     assert route['optimal_path'][0] == route['furthest_point']
     assert route['optimal_path'][-1] in exits
+
+
+def test_routes_are_straightened_to_lines_of_sight():
+    g = [['wall'] * 32 for _ in range(32)]
+    for r in range(1, 31):
+        for c in range(1, 31):
+            g[r][c] = 'floor'
+    g[31][30] = 'door'
+    pf = Pathfinder([g], [g], GS, ONE_FLOOR, {}, True, False)
+    pf.create_graph()
+    room = {'name': 'room', 'floor': 0, 'polygon': [], 'points': [(r, c) for r in range(1, 31) for c in range(1, 31)]}
+    route = pf.calculate_escape_routes([room], [(31, 30, 0)])[0]
+    # from the far corner (1, 1) straight to the cell in front of the door (30, 30), then one step through it
+    assert route['distance'] == pytest.approx((29 * 2 ** 0.5 + 1) * GS, rel=1e-6)
+    assert route['optimal_path'] == [(1, 1, 0), (30, 30, 0), (31, 30, 0)]
+
+
+def test_no_route_is_explained():
+    pf, grids = two_floors_with_a_stair(stair_floors=(1, 2), floors_count=3)
+    route = pf.calculate_escape_routes([whole_floor(grids, 2)], [(0, 0, 0)])[0]
+    assert route['diagnosis']['code'] == 'no_exit_on_floor'
+    g = wall_with_door(7)                      # 0.7 m door: closed by the buffer
+    g[39][20] = 'door'                         # outside door below the wall
+    gm = GridManager([g], GS, ONE_FLOOR, {})
+    buffered = gm.apply_wall_buffer(4)
+    pf = Pathfinder(gm.get_original_grids(), buffered, GS, ONE_FLOOR, {}, True, False)
+    pf.create_graph()
+    top = {'name': 'top', 'floor': 0, 'polygon': [], 'points': [(r, c) for r in range(1, 20) for c in range(1, 39)]}
+    route = pf.calculate_escape_routes([top], [(39, 20, 0)])[0]
+    assert route['distance'] is None and route['diagnosis']['code'] == 'narrow'
+    assert route['diagnosis']['cell'] is not None
+
+
+def test_rules_follow_the_use_of_the_space():
+    route = {'distance': 40.0, 'exits_reachable': 1}
+    assert check_escape_route_rules(route, GS, use='day') == {'general': [], 'daytime': [], 'nighttime': []}
+    assert len(check_escape_route_rules(route, GS, use='night')['nighttime']) == 1
+    assert check_escape_route_rules({'distance': None}, GS, lang='nl')['general'][0] == 'Geen evacuatieweg gevonden'
 
 
 def test_stair_edge_costs_its_3d_length():
@@ -255,7 +294,7 @@ def test_required_exits_follow_lg_2_2_1():
 
 
 def test_rules():
-    assert check_escape_route_rules({'distance': None}, GS)['general'] == ["No escape route found!"]
+    assert check_escape_route_rules({'distance': None}, GS)['general'] == ["No escape route found"]
     assert check_escape_route_rules({'distance': 0.0, 'exits_reachable': 1}, GS)['general'] == []
     route = {'distance': 40.0, 'exits_reachable': 2, 'second_exit_distance': 70.0}
     v = check_escape_route_rules(route, GS, True)
@@ -372,3 +411,144 @@ def test_buffered_inside_door_is_not_an_exit_and_exit_cell_is_open():
     exits = detect_exits(buffered, GS, ONE_FLOOR, {}, None, gm.get_original_grids())
     assert len(exits) == 1 and exits[0][0] == 41
     assert buffered[0][exits[0][0]][exits[0][1]] == 'door'
+
+
+# ------------------------------------------------------------- projects API
+
+@pytest.fixture
+def project_dir(monkeypatch):
+    import shutil
+    import tempfile
+    import projects
+    import app as app_module
+    directory = tempfile.mkdtemp(prefix='escape_projects_')
+    monkeypatch.setattr(projects, 'PROJECT_DIR', directory)
+    yield directory
+    for project in app_module.store.projects.values():   # no autosave after the test, into the real folder
+        project.cancel_save()
+    app_module.store.projects.clear()
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_project_lifecycle(client, project_dir):
+    """Upload a grid file, edit, undo and redo, set use and occupancy, analyse, export, reload from disk."""
+    import json as _json
+    import app as app_module
+    app_module.store.projects.clear()
+
+    g = l_shaped_floor()
+    data = {'grids': pack(to_codes([g])), 'grid_size': GS, 'floors': [{'elevation': 0.0, 'height': 3.0, 'name': 'L0'}],
+            'bbox': {'min_x': 0.0, 'min_y': 0.0}, 'doors': [], 'ifc_spaces': []}
+    r = client.post('/api/projects', data={'file': (io.BytesIO(_json.dumps(data).encode()), 'test_grid.json')},
+                    content_type='multipart/form-data')
+    assert r.status_code == 201
+    pid = r.get_json()['project']['id']
+
+    d = client.post(f'/api/projects/{pid}/edit', json={'floor': 0, 'type': 'wall', 'cells': [[10, 5], [10, 6]]}).get_json()
+    assert len(d['original']) == 2 and d['can_undo']
+    u = client.post(f'/api/projects/{pid}/undo', json={}).get_json()
+    assert {tuple(c[:2]) for c in u['original']} == {(10, 5), (10, 6)} and u['can_redo']
+    assert client.post(f'/api/projects/{pid}/undo', json={'redo': True}).get_json()['original']
+    f = client.post(f'/api/projects/{pid}/edit', json={'floor': 0, 'type': 'stair', 'fill': [35, 20]}).get_json()
+    assert len(f['original']) > 100                       # the whole connected floor of the L
+    assert len(client.post(f'/api/projects/{pid}/undo', json={}).get_json()['original']) == len(f['original'])
+
+    res = client.post(f'/api/projects/{pid}/analyse').get_json()
+    assert res['routes'] and res['compartments'][0]['id'] == 'floor-0'
+    comp = res['compartments'][0]['id']
+    space = res['spaces'][0]['id']
+    client.post(f'/api/projects/{pid}/overrides', json={'occupancy': {comp: 600}, 'use': {space: 'night'}})
+    res = client.post(f'/api/projects/{pid}/analyse').get_json()
+    assert res['compartments'][0]['needed'] == 3          # 600 persons: 2 + 1 exits (LG 2.2.1)
+    route = next(x for x in res['routes'] if x['space_id'] == space)
+    assert route['use'] == 'night' and route['use_source'] == 'set'
+
+    assert 'buffered' in client.post(f'/api/projects/{pid}/settings', json={'wall_buffer': 3}).get_json()
+    assert client.get(f'/api/projects/{pid}/export/pdf?lang=fr').status_code == 200
+    grid = client.get(f'/api/projects/{pid}/export/grid')
+    assert grid.status_code == 200 and _json.loads(grid.data)['settings']['wall_buffer'] == 3
+    assert client.get(f'/api/projects/{pid}/export/ifc').status_code == 400   # no IFC behind a grid file
+
+    app_module.store.projects[pid].save()
+    app_module.store.projects.clear()                   # as after a restart
+    again = client.get(f'/api/projects/{pid}').get_json()
+    assert again['settings']['wall_buffer'] == 3 and again['overrides']['occupancy'][comp] == 600
+    assert any(p['id'] == pid for p in client.get('/api/projects').get_json()['projects'])
+
+
+def test_mapping_rules():
+    from ifc_processing import load_mapping, match_mapping
+    import ifcopenshell
+    import ifcopenshell.api
+    rules = load_mapping('mappings/archicad-lithuanian-proxies.json' if os.path.exists('mappings/archicad-lithuanian-proxies.json')
+                         else os.path.join(ROOT, 'mappings', 'archicad-lithuanian-proxies.json'))
+    model = ifcopenshell.file(schema='IFC4')
+    stair = ifcopenshell.api.run('root.create_entity', model, ifc_class='IfcBuildingElementProxy', name='Laiptų maršas')
+    slab = ifcopenshell.api.run('root.create_entity', model, ifc_class='IfcBuildingElementProxy', name='Perdangos plokštės')
+    other = ifcopenshell.api.run('root.create_entity', model, ifc_class='IfcBuildingElementProxy', name='WC pakabinamas')
+    assert match_mapping(stair, rules)['as'] == 'stair' and match_mapping(stair, rules)['flat_stair']
+    assert match_mapping(slab, rules)['as'] == 'floor'
+    assert match_mapping(other, rules) is None
+    with pytest.raises(ValueError):
+        load_mapping({'rules': [{'class': 'IfcWall', 'as': 'roof'}]})
+
+
+def test_fire_exit_spaces_and_doors_follow_lg_4_4_1_2():
+    """A FireExit stairwell space and a FireExit door beside the stair are exits above the evacuation level, not on it;
+    a FireExit space without a stair (a protected evacuation route) is an exit on the evacuation level only."""
+    pf, grids = two_floors_with_a_stair()
+    stair_cells = [(r, 6) for r in range(5, 25)]
+    hall = [(r, c) for r in range(3, 27) for c in range(4, 9)]
+    route = [(r, c) for r in range(26, 30) for c in range(0, 12)]
+    spaces = [
+        {'name': 'stairwell 1', 'floor': 1, 'points': hall, 'cells': hall, 'fire_exit': True, 'polygon': []},
+        {'name': 'stairwell 0', 'floor': 0, 'points': hall, 'cells': hall, 'fire_exit': True, 'polygon': []},
+        {'name': 'route 0', 'floor': 0, 'points': route, 'cells': route, 'fire_exit': True, 'polygon': []},
+        {'name': 'route 1', 'floor': 1, 'points': route, 'cells': route, 'fire_exit': True, 'polygon': []},
+    ]
+    for f in (0, 1):
+        pf.codes[f, 10, 9] = 3            # a door cell beside the stair
+    doors = [{'floor': f, 'cells': [10, 10, 9, 9], 'fire_exit': True, 'is_external': False, 'name': f'door {f}'} for f in (0, 1)]
+    groups = pf.exit_groups([(0, 0, 0)], True, doors, spaces)
+    kinds = {(g['kind'], g.get('floor', 0), g['label']) for g in groups}
+    assert ('stairwell', 1, 'stairwell 1') in kinds and ('evacuation route', 0, 'route 0') in kinds
+    assert ('stairwell door', 1, 'door 1') in kinds
+    labels = {g['label'] for g in groups}
+    assert 'stairwell 0' not in labels and 'route 1' not in labels and 'door 0' not in labels
+    assert stair_cells  # the stair itself stays an exit on floor 1 (LG 4.2.2.2)
+
+
+def test_occupancy_type_follows_rule_gen_d17():
+    from ifc_processing import fold, NIGHT_OCCUPANCY_VALUES
+    assert all(fold(v) in NIGHT_OCCUPANCY_VALUES for v in ('Night occupancy', 'NIGHT_OCCUPANCY', ' night-occupancy'))
+    assert fold('Night occupancies') not in NIGHT_OCCUPANCY_VALUES and fold('Office') not in NIGHT_OCCUPANCY_VALUES
+
+
+def test_project_paths_exits_floors_and_attached_ifc(client, project_dir):
+    import json as _json
+    import app as app_module
+    app_module.store.projects.clear()
+    pf, grids = two_floors_with_a_stair(floors_count=3, stair_floors=(0, 1))
+    data = {'grids': pack(to_codes(grids)), 'grid_size': GS, 'bbox': {'min_x': 0.0, 'min_y': 0.0},
+            'floors': [{'elevation': 3.0 * f, 'height': 3.0, 'name': f'L{f}'} for f in range(3)],
+            'doors': [{'floor': 2, 'cells': [1, 1, 1, 1]}],
+            'ifc_spaces': [{'guid': 'S2', 'name': 'top', 'floor': 2, 'runs': [[2, 2, 5]]},
+                           {'guid': 'S1', 'name': 'middle', 'floor': 1, 'runs': [[2, 2, 5]]}]}
+    pid = client.post('/api/projects', data={'file': (io.BytesIO(_json.dumps(data).encode()), 'g.json')},
+                      content_type='multipart/form-data').get_json()['project']['id']
+    path = client.post(f'/api/projects/{pid}/path', json={'start': {'row': 2, 'col': 2, 'floor': 1},
+                                                       'goals': [{'row': 0, 'col': 0, 'floor': 0}]}).get_json()
+    assert path['path'] and {p[2] for p in path['path']} == {0, 1}
+    r = client.post(f'/api/projects/{pid}/exits', json={'exits': [[0, 0, 0], [5, 5, 2]]}).get_json()
+    assert r['exits'] == [[0, 0, 0], [5, 5, 2]]
+    state = client.post(f'/api/projects/{pid}/floors', json={'action': 'remove', 'floor': 1}).get_json()
+    assert state['floors'] == 2
+    project = app_module.store.get(pid)
+    assert [(s['name'], s['floor']) for s in project.meta['ifc_spaces']] == [('top', 1)]   # middle went, top moved down
+    assert project.meta['doors'][0]['floor'] == 1 and project.exits == [[0, 0, 0], [5, 5, 1]]
+    assert client.post(f'/api/projects/{pid}/exits', json={'exits': None}).get_json()['detected'] is not None
+    ifc = os.path.join(ROOT, 'ExampleInputs', 'Duplex.ifc')
+    if os.path.exists(ifc):
+        with open(ifc, 'rb') as f:
+            assert client.post(f'/api/projects/{pid}/ifc', data={'file': (f, 'Duplex.ifc')}, content_type='multipart/form-data').status_code == 200
+        assert project.meta['ifc_file'].endswith('model.ifc')

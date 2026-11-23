@@ -12,33 +12,10 @@ import webbrowser
 from threading import Timer
 
 from io import BytesIO
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
-
-def report_fonts():
-    """A TrueType font with the letters IFC room names use (ų, é, ...), regular and bold; Helvetica, which only
-    covers Latin-1, when none is found."""
-    candidates = [
-        (os.path.join(os.environ.get('WINDIR', 'C:/Windows'), 'Fonts', 'arial.ttf'),
-         os.path.join(os.environ.get('WINDIR', 'C:/Windows'), 'Fonts', 'arialbd.ttf')),
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        ("/Library/Fonts/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf"),
-    ]
-    for regular, bold in candidates:
-        if os.path.exists(regular) and os.path.exists(bold):
-            try:
-                if 'ReportSans' not in pdfmetrics.getRegisteredFontNames():
-                    pdfmetrics.registerFont(TTFont('ReportSans', regular))
-                    pdfmetrics.registerFont(TTFont('ReportSans-Bold', bold))
-                return 'ReportSans', 'ReportSans-Bold'
-            except Exception:
-                continue
-    return 'Helvetica', 'Helvetica-Bold'
+from report import build_pdf
+from projects import ProjectStore, Jobs, project_from_grid_file
+import i18n
 
 import logging
 import sys, traceback
@@ -396,114 +373,232 @@ def api_update_ifc_with_routes():
 @app.route('/api/generate-pdf-report', methods=['POST'])
 def generate_pdf_report():
     data = request.json
-    escape_routes = data['escape_routes']
-    grid_size = data['grid_size']
-    floors = data['floors']
     filename = os.path.splitext(data['filename'])[0]
-    require_second_exit = bool(data.get('require_second_exit', False))
     occupancy = data.get('occupancy')
     occupancy = float(occupancy) if occupancy not in (None, '') else None
-    needed = max(required_exits(occupancy), 2 if require_second_exit else 1)
-    require_second_exit = needed >= 2
+    needed = max(required_exits(occupancy), 2 if bool(data.get('require_second_exit', False)) else 1)
+    pdf = build_pdf(data['escape_routes'], data['floors'], filename + '.ifc', data.get('language', 'en'),
+                    occupancy=occupancy, needed=needed)
+    return send_file(BytesIO(pdf), as_attachment=True, download_name=f"{filename}_report.pdf", mimetype='application/pdf')
 
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    styles = getSampleStyleSheet()
-    font, bold_font = report_fonts()
-    for style in styles.byName.values():
-        if hasattr(style, 'fontName'):
-            style.fontName = bold_font if 'Bold' in style.fontName else font
-    elements = []
 
-    # Title
-    elements.append(Paragraph("Escape Routes Report", styles['Title']))
-    elements.append(Paragraph(f"File: <u>{escape(filename)}.ifc</u>", styles['Heading2']))
-    elements.append(Paragraph("Checked against KB 7 July 1994, annex 2/1 (low buildings): LG 2.2.1 number of exits, "
-                              "LG 4.4.1.1 distances to the nearest and a second exit, LG 4.4.1.2 exits "
-                              "(doors to the open air on the evacuation level, stairwells on other floors).", styles['BodyText']))
-    occupancy_text = f"{occupancy:.0f} persons" if occupancy is not None else "not given"
-    elements.append(Paragraph(f"Occupancy: {occupancy_text}; exits required per compartment: {needed}.", styles['BodyText']))
-    elements.append(Spacer(1, 12))
+# ------------------------------------------------------------------ projects (server-side state)
 
-    # Violations summary
-    elements.append(Paragraph("Routes with Violations:", styles['Heading2']))
-    for route in escape_routes:
-        if any(route['violations'].values()):
-            elements.append(Paragraph(f"Space: {escape(route['space_name'])}", styles['Heading3']))
-            for violation_type, violations in route['violations'].items():
-                if violations:
-                    elements.append(Paragraph(f"{violation_type.capitalize()}:", styles['Heading4']))
-                    for violation in violations:
-                        elements.append(Paragraph(f"- {escape(violation)}", styles['BodyText']))
-            elements.append(Spacer(1, 12))
+store = ProjectStore()
+jobs = Jobs()
 
-    # Table of all routes
-    elements.append(Paragraph("Overview of All Routes:", styles['Heading2']))
-    
-    for floor_index, floor in enumerate(floors):
-        elements.append(Paragraph(f"Floor {floor_index+1}/{len(floors)}: '{escape(str(floor.get('name')))}'", styles['Heading3']))
 
-        header = ["Space", "To Exit (m)", "Exit"]
-        if require_second_exit:
-            header.append("Second Exit (m)")
-        table_data = [header + ["Violations"]]
-        floor_routes = [route for route in escape_routes if int(route['starting_elevation']) == floor_index]
-        for route in floor_routes:
-            total_length = route['distance'] if route['distance'] is not None else "N/A"
-            length_to_stairs = route.get('exit_kind') or "N/A"
-            violations = ", ".join([v for vtype in route['violations'].values() for v in vtype]) or "None"
-            row = [
-                route['space_name'],
-                f"{total_length:.2f}" if isinstance(total_length, (int, float)) else total_length,
-                f"{length_to_stairs:.2f}" if isinstance(length_to_stairs, (int, float)) else length_to_stairs,
-            ]
-            if require_second_exit:
-                second = route.get('second_exit_distance')
-                row.append(f"{second:.2f}" if isinstance(second, (int, float)) else "N/A")
-            table_data.append(row + [violations])
-        
-        if len(table_data) > 1:
-            # Paragraph cells wrap long room names and violation texts inside fixed column widths.
-            cell = ParagraphStyle('cell', parent=styles['BodyText'], fontName=font, fontSize=8, leading=10)
-            head = ParagraphStyle('head', parent=cell, fontName=bold_font, textColor=colors.whitesmoke)
-            table_data = [[Paragraph(escape(str(v)), head if r == 0 else cell) for v in row] for r, row in enumerate(table_data)]
-            widths = [130, 50, 55] + ([55] if require_second_exit else [])
-            widths.append(doc.width - sum(widths))
-            table = Table(table_data, colWidths=widths, repeatRows=1)
-            table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('BOTTOMPADDING', (0, 0), (-1, 0), 6),
-                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-                ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
-                ('TOPPADDING', (0, 1), (-1, -1), 3),
-                ('BOTTOMPADDING', (0, 1), (-1, -1), 3),
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
-            ]))
+def project_or_404(pid):
+    try:
+        return store.get(pid)
+    except KeyError:
+        return None
 
-            # Color rows based on violations (row i + 1 of this floor's table)
-            for i, route in enumerate(floor_routes):
-                if route['violations']['general'] or route['violations']['daytime']:
-                    table.setStyle(TableStyle([('BACKGROUND', (0, i+1), (-1, i+1), colors.pink)]))
-                elif route['violations']['nighttime']:
-                    table.setStyle(TableStyle([('BACKGROUND', (0, i+1), (-1, i+1), colors.yellow)]))
 
-            elements.append(table)
-            elements.append(Spacer(1, 12))
+def not_found():
+    return jsonify({'error': 'Project not found'}), 404
+
+
+@app.route('/api/projects', methods=['GET'])
+def list_projects():
+    return jsonify({'projects': store.list()})
+
+
+@app.route('/api/projects', methods=['POST'])
+def create_project():
+    """Upload an IFC (converted in the background: returns a job) or a saved grid JSON (returns the project)."""
+    file = request.files.get('file')
+    if file is None or file.filename == '' or not allowed_file(file.filename):
+        return jsonify({'error': 'Choose an .ifc or a saved grid .json file'}), 400
+    filename = secure_filename(file.filename)
+    name = request.form.get('name') or os.path.splitext(file.filename)[0]
+    if filename.lower().endswith('.json'):
+        try:
+            data = json.load(file.stream)
+            parts = project_from_grid_file(data)
+        except Exception as e:
+            return jsonify({'error': f'Not a grid file this tool can read: {e}'}), 400
+        project = store.create(name, parts['meta'], parts['codes'], parts['settings'], parts['overrides'], parts['exits'])
+        return jsonify({'project': project.state()}), 201
+
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(path)
+    grid_size = float(request.form.get('grid_size') or 0.1)
+    mapping = request.form.get('mapping') or None
+    if 'mapping_file' in request.files and request.files['mapping_file'].filename:
+        mapping = request.files['mapping_file'].read().decode('utf-8')
+    if mapping:
+        try:
+            from ifc_processing import load_mapping
+            load_mapping(mapping)
+        except Exception as e:
+            return jsonify({'error': f'Mapping file: {e}'}), 400
+
+    def work(progress):
+        result = process_ifc_file(path, grid_size, mapping, progress)
+        meta = {k: result[k] for k in ('grid_size', 'floors', 'bbox', 'doors', 'ifc_spaces', 'compartments', 'warnings')}
+        meta['source_file'] = file.filename
+        meta['mapping'] = mapping
+        project = store.create(name, meta, to_codes(result['grids']), ifc_path=path)
+        return {'project_id': project.id}
+
+    return jsonify({'job_id': jobs.start(work, 'Converting the IFC file')}), 202
+
+
+@app.route('/api/jobs/<jid>', methods=['GET'])
+def job_status(jid):
+    try:
+        return jsonify(jobs.get(jid))
+    except KeyError:
+        return jsonify({'error': 'Job not found'}), 404
+
+
+@app.route('/api/projects/<pid>', methods=['GET'])
+def get_project(pid):
+    project = project_or_404(pid)
+    return jsonify(project.state()) if project else not_found()
+
+
+@app.route('/api/projects/<pid>/edit', methods=['POST'])
+def edit_project(pid):
+    """{"floor": f, "type": "wall", "cells": [[row, col], ...]} or {"floor": f, "type": ..., "fill": [row, col]}"""
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    data = request.json
+    try:
+        if data.get('fill') is not None:
+            diff = project.fill(int(data['floor']), int(data['fill'][0]), int(data['fill'][1]), data['type'])
         else:
-            elements.append(Paragraph("No routes on this floor.", styles['BodyText']))
-            elements.append(Spacer(1, 12))
+            diff = project.edit(int(data['floor']), data.get('cells', []), data['type'])
+        return jsonify(diff)
+    except (KeyError, ValueError, IndexError) as e:
+        return jsonify({'error': f'Invalid edit: {e}'}), 400
 
-    elements.append(Paragraph("Not checked by this tool:", styles['Heading2']))
-    for item in NOT_CHECKED:
-        elements.append(Paragraph(f"- {escape(item)}", styles['BodyText']))
 
-    doc.build(elements)
-    buffer.seek(0)
-    
-    return send_file(buffer, as_attachment=True, download_name=f"{filename}_report.pdf", mimetype='application/pdf')
-        
+@app.route('/api/projects/<pid>/undo', methods=['POST'])
+def undo_project(pid):
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    diff = project.undo_last(redo=bool((request.json or {}).get('redo')))
+    return jsonify(diff or {'floor': None, 'original': [], 'buffered': [], 'can_undo': bool(project.undo), 'can_redo': bool(project.redo)})
+
+
+@app.route('/api/projects/<pid>/settings', methods=['POST'])
+def project_settings(pid):
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    rebuffered = project.update_settings(request.json or {})
+    out = {'settings': project.settings}
+    if rebuffered:
+        out['buffered'] = pack(project.buffered)
+    return jsonify(out)
+
+
+@app.route('/api/projects/<pid>/floors', methods=['POST'])
+def project_floors(pid):
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    data = request.json or {}
+    try:
+        project.floors_action(data.get('action'), int(data.get('floor', 0)))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify(project.state())
+
+
+@app.route('/api/projects/<pid>/exits', methods=['POST'])
+def project_exits(pid):
+    """{"exits": [[row, col, floor], ...]} to place exits by hand, or {"exits": null} to detect them again."""
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    project.set_exits((request.json or {}).get('exits'))
+    return jsonify({'exits': project.exits, 'detected': project.detected_exits() if project.exits is None else None})
+
+
+@app.route('/api/projects/<pid>/overrides', methods=['POST'])
+def project_overrides(pid):
+    """{"use": {space_id: "day" | "night" | null}, "occupancy": {compartment_id: persons | null}}"""
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    data = request.json or {}
+    project.update_overrides(data.get('use'), data.get('occupancy'))
+    return jsonify({'overrides': project.overrides})
+
+
+@app.route('/api/projects/<pid>/analyse', methods=['POST'])
+def analyse_project(pid):
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    try:
+        return jsonify(project.analyse())
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}", exc_info=True)
+        return jsonify({'error': f'The analysis failed: {e}'}), 500
+
+
+@app.route('/api/projects/<pid>/path', methods=['POST'])
+def project_path(pid):
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    data = request.json or {}
+    try:
+        return jsonify(project.find_path(data['start'], data['goals']))
+    except (KeyError, ValueError) as e:
+        return jsonify({'error': str(e)}), 400
+
+
+@app.route('/api/projects/<pid>/ifc', methods=['POST'])
+def attach_project_ifc(pid):
+    """Attach the IFC a grid file was made from, so the routes can be exported into it."""
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    file = request.files.get('file')
+    if file is None or not file.filename.lower().endswith('.ifc'):
+        return jsonify({'error': 'Choose the .ifc file this grid was made from'}), 400
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(file.filename))
+    file.save(path)
+    project.attach_ifc(path)
+    return jsonify({'ifc_file': True})
+
+
+@app.route('/api/projects/<pid>/export/<kind>', methods=['GET'])
+def export_project(pid, kind):
+    project = project_or_404(pid)
+    if not project:
+        return not_found()
+    base = secure_filename(project.name) or 'project'
+    if kind == 'grid':
+        body = json.dumps(project.export_grid())
+        return send_file(BytesIO(body.encode('utf-8')), as_attachment=True, download_name=f"{base}_grid.json",
+                         mimetype='application/json')
+    results = project.results or project.analyse()
+    if kind == 'pdf':
+        lang = request.args.get('lang') or project.settings.get('language', 'en')
+        pdf = build_pdf(project.routes_in(lang), project.meta['floors'], project.meta.get('source_file') or project.name, lang,
+                        compartments=results['compartments'])
+        return send_file(BytesIO(pdf), as_attachment=True, download_name=f"{base}_report_{lang}.pdf", mimetype='application/pdf')
+    if kind == 'ifc':
+        ifc_path = project.meta.get('ifc_file')
+        if not ifc_path or not os.path.isfile(ifc_path):
+            return jsonify({'error': 'This project has no IFC file (it was loaded from a grid file): attach the IFC first'}), 400
+        out = os.path.join(project.directory, f"{base}_with_routes.ifc")
+        m = project.meta
+        add_escape_routes_to_ifc(ifc_path, out, results['routes'], m['grid_size'], m['bbox'], m['floors'])
+        return send_file(out, as_attachment=True, download_name=f"{base}_with_routes.ifc")
+    return jsonify({'error': f'Unknown export {kind}'}), 400
+
+
 @app.route('/static/<path:path>')
 def send_static(path: str) -> Any:
     return send_from_directory('static', path)

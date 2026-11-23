@@ -16,6 +16,8 @@ from typing import Dict, List, Tuple, Any, Optional
 import traceback
 import logging
 import os, sys
+import json
+import re
 
 from contextlib import contextmanager
 
@@ -32,6 +34,57 @@ ALL_TYPES = WALL_TYPES + FLOOR_TYPES + DOOR_TYPES + STAIR_TYPES
 # Floor finishes and ceilings lie flat on or above a floor: read as walls they would block whole rooms.
 IGNORED_COVERING_TYPES = {'FLOORING', 'CEILING'}
 TYPE_PRECEDENCE = {'door': 0, 'stair': 1, 'wall': 2, 'floor': 3}
+
+
+# Names that suggest sleeping occupants, for spaces without an OccupancyType (a guess, shown as such in the app).
+NIGHT_USE_WORDS = re.compile(r"bed ?room|sleep|slaap|chambre|dortoir|night|nacht|nuit|miegam|hotel ?room", re.IGNORECASE)
+# OccupancyType values for night use (annex 1, 1.16), compared folded as in Rule Gen (D17); every other value is day use.
+NIGHT_OCCUPANCY_VALUES = {'night occupancy', 'nachtbezetting', 'occupation de nuit', 'occupation nocturne'}
+
+
+def fold(text: Any) -> str:
+    """NFKC, lower case, runs of spaces, underscores and hyphens as one space, trimmed."""
+    import unicodedata
+    return re.sub(r"[\s_\-]+", " ", unicodedata.normalize('NFKC', str(text)).lower()).strip()
+
+
+def load_mapping(mapping: Any) -> List[Dict[str, Any]]:
+    """Mapping rules from a dict ({"rules": [...]}), a list of rules, JSON text or a file path.
+
+    A rule: {"class": "IfcBuildingElementProxy", "name": "regex on Name or ObjectType", "as": "stair" | "floor" |
+    "wall" | "door" | "ignore", "flat_stair": true}. The first matching rule decides; elements no rule matches keep
+    the default types. "flat_stair" treats a flat stair symbol (a plate at a floor level) as rising to the next level
+    where another flight starts."""
+    if not mapping:
+        return []
+    if isinstance(mapping, str):
+        text = mapping
+        if os.path.exists(mapping):
+            with open(mapping, encoding='utf-8') as f:
+                text = f.read()
+        mapping = json.loads(text)
+    rules = mapping.get('rules', []) if isinstance(mapping, dict) else list(mapping)
+    out = []
+    for rule in rules:
+        target = rule.get('as')
+        if target not in ('stair', 'floor', 'wall', 'door', 'ignore'):
+            raise ValueError(f"Mapping rule needs 'as' (stair, floor, wall, door or ignore): {rule}")
+        out.append({'class': rule.get('class', 'IfcProduct'),
+                    'name': re.compile(rule['name'], re.IGNORECASE) if rule.get('name') else None,
+                    'as': target, 'flat_stair': bool(rule.get('flat_stair'))})
+    return out
+
+
+def match_mapping(element, rules: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for rule in rules:
+        if not element.is_a(rule['class']):
+            continue
+        if rule['name'] is not None:
+            text = ' '.join(t for t in (element.Name, getattr(element, 'ObjectType', None)) if t)
+            if not rule['name'].search(text):
+                continue
+        return rule
+    return None
 
 
 def get_element_type(element: ifcopenshell.entity_instance) -> Optional[str]:
@@ -151,6 +204,27 @@ def cells_overlapping_triangles(tris: np.ndarray, shape: Tuple[int, int], eps: f
     return linear // shape[1], linear % shape[1]
 
 
+def space_properties(space, label: str) -> Dict[str, Any]:
+    """Use (day or night), occupancy and FireExit of an IfcSpace, from its property sets, else guessed from its name.
+
+    Pset_SpaceOccupancyRequirements gives OccupancyType and OccupancyNumber: "Night occupancy" is night use, any other
+    value day use (as Rule Gen reads it, D17); without a value, a name such as "bedroom" suggests night use. FireExit
+    is in Pset_SpaceFireSafetyRequirements (IFC4) or Pset_SpaceCommon (IFC2x3)."""
+    psets = ifcopenshell.util.element.get_psets(space)
+    occupancy = psets.get('Pset_SpaceOccupancyRequirements', {})
+    fire = psets.get('Pset_SpaceFireSafetyRequirements', {})
+    common = psets.get('Pset_SpaceCommon', {})
+    fire_exit = fire.get('FireExit', common.get('FireExit'))
+    occupancy_type = occupancy.get('OccupancyType') or ''
+    use, use_source = None, None
+    if occupancy_type:
+        use, use_source = ('night' if fold(occupancy_type) in NIGHT_OCCUPANCY_VALUES else 'day'), 'ifc'
+    elif NIGHT_USE_WORDS.search(label):
+        use, use_source = 'night', 'name'
+    return {'use': use, 'use_source': use_source, 'occupancy': occupancy.get('OccupancyNumber'),
+            'fire_exit': fire_exit}
+
+
 def cells_to_runs(xs: np.ndarray, ys: np.ndarray) -> List[List[int]]:
     """Cells as runs [row, first column, last column], a compact form for JSON."""
     order = np.lexsort((ys, xs))
@@ -193,9 +267,13 @@ def door_rectangle(points: np.ndarray, extension: float = 0.0) -> np.ndarray:
 
 
 class IFCProcessor:
-    def __init__(self, file_path: str, grid_size: float = 0.1):
+    def __init__(self, file_path: str, grid_size: float = 0.1, mapping: Any = None, progress=None):
         self.file_path = file_path
         self.grid_size = grid_size
+        self.mapping = load_mapping(mapping)
+        self.flat_stairs = set()      # step ids of flat stair symbols (mapping "flat_stair")
+        self.compartments = []
+        self._progress = progress
         self.ifc_file = None
         self.bbox = None
         self.floors = None
@@ -210,17 +288,28 @@ class IFCProcessor:
         self.shapes = {}    # step id -> (verts (n, 3), faces (m, 3)) in world metres
         self.skipped = Counter()
 
+    def progress(self, fraction: float, message: str) -> None:
+        if self._progress:
+            self._progress(max(0.0, min(1.0, fraction)), message)
+
     def process(self) -> Dict[str, Any]:
         """Turn the IFC file into one grid per floor. Errors are raised, not hidden."""
+        self.progress(0.0, "Reading the IFC file")
         self.ifc_file = self.load_ifc_file()
         logger.info("IFC file loaded")
         self.collect_targets()
+        self.progress(0.05, "Triangulating elements")
         self.load_shapes()
         self.bbox, self.floors = self.calculate_bounding_box_and_floors()
+        self.raise_flat_stairs()
         self.grids = self.create_grids()
+        self.progress(0.65, "Marking elements on the grid")
         self.process_elements()
+        self.progress(0.92, "Reading spaces and compartments")
         self.extract_ifc_spaces()
+        self.extract_compartments()
         self.trim_grids()
+        self.progress(1.0, "Converted")
 
         warnings = {}
         if self.skipped:
@@ -236,6 +325,7 @@ class IFCProcessor:
             'unit_size': self.unit_size,
             'spaces': self.spaces,
             'ifc_spaces': self.ifc_spaces,
+            'compartments': self.compartments,
             'doors': self.doors,
             'warnings': warnings,
         }
@@ -251,9 +341,14 @@ class IFCProcessor:
 
         An element that has a type of its own and is also a part (a door in a curtain wall, a landing slab in a stair)
         gets the stronger of the two, door > stair > wall > floor, as the marking order does."""
-        for cls in ALL_TYPES:
-            for element in self.ifc_file.by_type(cls):
-                element_type = get_element_type(element)
+        classes = list(ALL_TYPES) + [r['class'] for r in self.mapping if r['class'] not in ALL_TYPES]
+        for cls in classes:
+            try:
+                elements = self.ifc_file.by_type(cls)
+            except RuntimeError:  # a class this schema does not have
+                continue
+            for element in elements:
+                element_type = self.get_element_type(element)
                 if element_type is None:
                     continue
                 self._add_target(element, element_type)
@@ -281,9 +376,13 @@ class IFCProcessor:
 
         iterator = ifcopenshell.geom.iterator(settings, self.ifc_file, max(1, multiprocessing.cpu_count() - 1), include=instances)
         if iterator.initialize():
+            done = 0
             while True:
                 shape = iterator.get()
                 self._store_shape(shape.id, shape.geometry)
+                done += 1
+                if done % 100 == 0:
+                    self.progress(0.05 + 0.55 * done / len(instances), f"Triangulating elements ({done} of {len(instances)})")
                 if not iterator.next():
                     break
 
@@ -398,6 +497,7 @@ class IFCProcessor:
         for i, (step_id, (element, element_type)) in enumerate(self.targets.items()):
             if i % 250 == 0:
                 logger.info(f"Processing element {i} out of {len(self.targets)}.")
+                self.progress(0.65 + 0.27 * i / max(len(self.targets), 1), f"Marking elements ({i} of {len(self.targets)})")
             if step_id in self.shapes:
                 verts, faces = self.shapes[step_id]
                 self.process_single_element(element, verts, faces, element_type)
@@ -446,10 +546,44 @@ class IFCProcessor:
             label = ' '.join(t for t in (space.Name, getattr(space, 'LongName', None)) if t) or space.GlobalId
             names[label] += 1
             self.ifc_spaces.append({'guid': space.GlobalId, 'name': label, 'floor': floor_index,
-                                    'runs': cells_to_runs(xs, ys)})
+                                    'runs': cells_to_runs(xs, ys), **space_properties(space, label)})
         for space in self.ifc_spaces:  # names must be unique: results are matched to spaces by name
             if names[space['name']] > 1:
                 space['name'] = f"{space['name']} ({space['guid']})"
+
+    def extract_compartments(self) -> None:
+        """Fire compartments as groups of IfcSpaces: IfcSpatialZones (IFC4) and IfcZones that are marked as fire
+        safety zones or named as compartments. Without them, each floor counts as one compartment (LG 2.1: a
+        compartment is one storey high)."""
+        found = {}
+        pattern = re.compile(r"compart|brandcomp|brand ?zone|fire ?zone|fire ?safety|gaisr", re.IGNORECASE)
+
+        def is_compartment(zone) -> bool:
+            if getattr(zone, 'PredefinedType', None) == 'FIRESAFETY':
+                return True
+            text = ' '.join(str(t) for t in (zone.Name, getattr(zone, 'LongName', None), getattr(zone, 'ObjectType', None)) if t)
+            return bool(pattern.search(text))
+
+        for zone_class in ('IfcSpatialZone', 'IfcZone'):
+            try:
+                zones = self.ifc_file.by_type(zone_class)
+            except RuntimeError:
+                continue
+            for zone in zones:
+                if not is_compartment(zone):
+                    continue
+                spaces = set()
+                for rel in getattr(zone, 'IsGroupedBy', None) or []:  # IfcZone: IfcRelAssignsToGroup
+                    spaces |= {o.GlobalId for o in rel.RelatedObjects if o.is_a('IfcSpace')}
+                for rel in getattr(zone, 'ReferencesElements', None) or []:  # IfcSpatialZone references
+                    spaces |= {o.GlobalId for o in rel.RelatedElements if o.is_a('IfcSpace')}
+                for rel in getattr(zone, 'IsDecomposedBy', None) or []:
+                    spaces |= {o.GlobalId for o in rel.RelatedObjects if o.is_a('IfcSpace')}
+                if spaces:
+                    occupancy = ifcopenshell.util.element.get_psets(zone).get('Pset_ZoneCommon', {}).get('OccupancyNumber')
+                    found[zone.GlobalId] = {'id': zone.GlobalId, 'name': zone.Name or zone.GlobalId,
+                                            'spaces': sorted(spaces), 'occupancy': occupancy}
+        self.compartments = list(found.values())
 
     def record_door(self, door, floor_index: int, cells: List[int]) -> None:
         """Keep what the IFC says about a door, so exits can be found from data instead of geometry alone."""
@@ -480,7 +614,31 @@ class IFCProcessor:
         return [int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())]
 
     def get_element_type(self, element: ifcopenshell.entity_instance) -> Optional[str]:
+        """The mapping rules first, then the default classes."""
+        rule = match_mapping(element, self.mapping)
+        if rule is not None:
+            if rule['flat_stair'] and rule['as'] == 'stair':
+                self.flat_stairs.add(element.id())
+            return None if rule['as'] == 'ignore' else rule['as']
         return get_element_type(element)
+
+    def raise_flat_stairs(self) -> None:
+        """A flat stair symbol (a plate at a floor level) is taken to rise to the next level where another flight
+        starts, or else to the next floor: its geometry is copied up there, so it shows on both floors and links them."""
+        flats = [i for i in self.flat_stairs if i in self.shapes]
+        if not flats:
+            return
+        bottoms = sorted({round(float(self.shapes[i][0][:, 2].min()), 1) for i in flats})
+        levels = sorted(set(bottoms[1:]) | {f['elevation'] for f in self.floors if f['elevation'] > bottoms[-1] + 0.5})
+        for i in flats:
+            verts, faces = self.shapes[i]
+            bottom = verts[:, 2].min()
+            above = [e for e in levels if e > bottom + 0.5]
+            if not above:
+                continue
+            up = verts.copy()
+            up[:, 2] += above[0] - bottom
+            self.shapes[i] = (np.vstack([verts, up]), np.vstack([faces, faces + len(verts)]))
 
     def mark_triangles(self, verts: np.ndarray, faces: np.ndarray, grid: np.ndarray, floor: Dict[str, float], element_type: str) -> None:
         """Mark the cells each triangle covers in plan (not its bounding box, so rotated walls stay thin)."""
@@ -564,8 +722,8 @@ class IFCProcessor:
         logger.info(f"Final grid dimensions: {self.grids[0].shape}, bounding box: {self.bbox}")
 
 
-def process_ifc_file(file_path: str, grid_size: float = 0.1) -> Dict[str, Any]:
-    processor = IFCProcessor(file_path, grid_size)
+def process_ifc_file(file_path: str, grid_size: float = 0.1, mapping: Any = None, progress=None) -> Dict[str, Any]:
+    processor = IFCProcessor(file_path, grid_size, mapping, progress)
     return processor.process()
 
 def create_escape_route_segment(ifcfile, sb, body, storey, points, grid_type, width=0.8, height=1.5, plan_width=0.8, unit_scale=1.0, space_name="", floor_number = 0):

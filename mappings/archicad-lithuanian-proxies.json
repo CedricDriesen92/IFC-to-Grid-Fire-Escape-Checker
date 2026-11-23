@@ -1,0 +1,7 @@
+{
+  "description": "ARCHICAD export (Lithuanian names) with floors and stairs as IfcBuildingElementProxy. Stair flights are flat plan symbols at floor level.",
+  "rules": [
+    {"class": "IfcBuildingElementProxy", "name": "laipt\\w* mar", "as": "stair", "flat_stair": true},
+    {"class": "IfcBuildingElementProxy", "name": "perdangos plok|grindu apdaila", "as": "floor"}
+  ]
+}
