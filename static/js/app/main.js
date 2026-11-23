@@ -112,7 +112,7 @@ $('exits-reset').onclick = async () => {
         view.request();
     } catch (e) { errorToast(e); }
 };
-on('exits', async () => { await refreshExits(); renderResults(); });
+on('exits', async () => { await refreshExits(); renderResults(); rerunSoon(); });
 
 // ------------------------------------------------------------------ floors
 
@@ -182,18 +182,38 @@ function applySettingsToControls() {
     $('language').value = s.language || 'en';
 }
 
-async function saveSetting(changes) {
-    if (!state.project) return;
-    try {
-        const res = await api.settings(state.project.id, changes);
-        state.project.settings = res.settings;
-        if (res.buffered) { loadBuffered(res.buffered); view.invalidate(); }
-        if (state.results && !('language' in changes && Object.keys(changes).length === 1)) { state.results.stale = true; renderResults(); }
-    } catch (e) { errorToast(e); }
+// Changes are saved in order, and the checks wait for them (otherwise a run could use the old settings).
+let saving = Promise.resolve();
+function whenSaved() { return saving; }
+function saveSetting(changes) {
+    if (!state.project) return Promise.resolve();
+    saving = saving.then(async () => {
+        try {
+            const res = await api.settings(state.project.id, changes);
+            state.project.settings = res.settings;
+            if (res.buffered) { loadBuffered(res.buffered); view.invalidate(); }
+        } catch (e) { errorToast(e); }
+    });
+    if (state.results) rerunSoon();
+    return saving;
+}
+
+// With results on screen, re-run the checks shortly after a change to the settings, uses, occupancy or exits.
+let rerunTimer = null;
+function rerunSoon() {
+    if (!state.results) return;
+    state.results.stale = true;
+    renderResults();
+    clearTimeout(rerunTimer);
+    rerunTimer = setTimeout(runChecks, 300);
 }
 $('clear-width').onchange = e => saveSetting({ wall_buffer: Number(e.target.value) });
 $('space-source').onchange = e => saveSetting({ space_source: e.target.value });
-$('default-occupancy').onchange = e => saveSetting({ occupancy: e.target.value === '' ? null : Number(e.target.value) });
+let occupancyTimer = null;
+$('default-occupancy').oninput = e => {
+    clearTimeout(occupancyTimer);
+    occupancyTimer = setTimeout(() => saveSetting({ occupancy: e.target.value === '' ? null : Number(e.target.value) }), 400);
+};
 $('require-second-exit').onchange = e => saveSetting({ require_second_exit: e.target.checked });
 $('stairs-as-exits').onchange = e => saveSetting({ stairs_as_exits: e.target.checked });
 $('allow-diagonal').onchange = e => saveSetting({ allow_diagonal: e.target.checked });
@@ -258,21 +278,28 @@ $('clear-path').onclick = () => { state.start = null; state.goals = []; state.pa
 
 // ------------------------------------------------------------------ checks and results
 
+let checking = false, checkAgain = false;
 async function runChecks() {
     if (!state.project) return;
+    if (checking) { checkAgain = true; return; }   // one run at a time; run once more after this one
+    checking = true;
     await busy($('run-checks'), async () => {
         try {
+            await whenSaved();
             state.results = await api.analyse(state.project.id);
             if (state.results.exits_detected) state.detectedExits = state.results.exits.map(e => e.cell);
             renderResults(); view.request(); refresh3d();
             steps.set(4, [1, 2, 3]);
             const problems = state.results.routes.filter(r => r.distance == null || Object.values(r.violations).some(v => v.length)).length;
-            toast(`${state.results.routes.length} spaces checked, ${problems ? problems + ' with problems' : 'no problems'}`, problems ? 'warn' : 'success');
+            toast(`${state.results.routes.length} spaces checked, ${problems ? problems + ' with problems' : 'no problems'}`, problems ? 'warn' : 'success', 2500);
         } catch (e) { errorToast(e); }
     });
+    checking = false;
+    if (checkAgain) { checkAgain = false; runChecks(); }
 }
 $('run-checks').onclick = runChecks;
-on('rerun', runChecks);
+$('results-stale').onclick = runChecks;
+on('rerun', rerunSoon);
 
 on('select', id => {
     state.selected = id;

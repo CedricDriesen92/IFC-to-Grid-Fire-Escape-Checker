@@ -136,9 +136,7 @@ export function initResults() {
             await api.overrides(state.project.id, { use: { [id]: value } });
             const r = state.results.routes.find(x => x.space_id === id);
             if (r) { r.use = value; r.use_source = value ? 'set' : null; }
-            state.results.stale = true;
-            renderResults();
-            toast('Use changed. Run the checks again.', 'info', 2500);
+            emit('rerun');
         } catch (err) { errorToast(err); }
     });
     const compTable = $('compartments-table');
