@@ -108,6 +108,13 @@ function build() {
                 const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
                     new THREE.LineBasicMaterial({ color: ROUTE_COLORS[routeStatus(route)] }));
                 group.add(line);
+                if (route.second_path) {
+                    const pts2 = route.second_path.map(([x, yy, fl]) => new THREE.Vector3((yy + 0.5) * gs, floors[fl].elevation - base + 0.2, (x + 0.5) * gs));
+                    const dashed = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts2),
+                        new THREE.LineDashedMaterial({ color: ROUTE_COLORS.second, dashSize: 0.4, gapSize: 0.25 }));
+                    dashed.computeLineDistances();
+                    group.add(dashed);
+                }
             }
         }
     });

@@ -11,7 +11,7 @@ export const COLORS = [
     [225, 193, 105],  // stair
     [146, 160, 160],  // walla: too narrow to pass
 ];
-export const ROUTE_COLORS = { ok: '#16a34a', day: '#dc2626', night: '#f59e0b', none: '#6b7280' };
+export const ROUTE_COLORS = { ok: '#16a34a', day: '#dc2626', night: '#f59e0b', none: '#6b7280', second: '#38bdf8' };
 
 export const state = {
     project: null,          // id, name, meta, settings, overrides, exits, can_undo, can_redo

@@ -51,7 +51,8 @@ Only annex 2/1 (low buildings) is covered.
   evacuation route on it. So do FireExit doors next to them. Balcony doors never count.
 - Distances (LG 4.4.1.1): measured on the person's own floor to the nearest exit. The way through the stairwell and
   in the open air does not count. Routes from the furthest cells are straightened to lines of sight, because grid
-  steps overstate walked length by up to 8 %. Second-exit distances are still grid lengths.
+  steps overstate walked length by up to 8 %. The second exit's route runs from the point furthest from a second
+  exit and is drawn dashed.
 - Rules: nearest exit within 45 m by day and 30 m by night, following each space's use (both when unknown). The
   number of exits follows the compartment's occupancy (LG 2.2.1): 1 below 100 persons, 2 up to 499, 2 + n from 500.
   When two or more are needed, the second exit must be within 80 m by day and 60 m by night.

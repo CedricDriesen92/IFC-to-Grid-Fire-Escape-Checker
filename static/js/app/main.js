@@ -394,6 +394,7 @@ function legend() {
     $('legend').innerHTML = `
         <div>${chip(COLORS[2])}wall ${chip(COLORS[3])}door ${chip(COLORS[4])}stair ${chip(COLORS[1])}floor ${chip(COLORS[5])}too narrow</div>
         <div>${line(ROUTE_COLORS.ok)}OK ${line(ROUTE_COLORS.day)}problem ${line(ROUTE_COLORS.night)}night only
+            <span class="legend-chip" style="border:0;border-top:2px dashed ${ROUTE_COLORS.second};height:0;vertical-align:3px"></span>second exit
             <span class="legend-chip" style="background:#a21caf;border-radius:99px"></span>furthest point
             <span class="legend-chip" style="background:#ef4444;border-radius:99px;border-color:#fff"></span>exit</div>`;
 }

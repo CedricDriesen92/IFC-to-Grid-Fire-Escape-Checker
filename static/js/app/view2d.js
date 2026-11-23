@@ -168,6 +168,17 @@ export class PlanView {
                 this.dot(x, y, selected ? 5 : 3, '#a21caf');
             }
         }
+        // second exit: dashed, from the point furthest from a second exit
+        for (const route of this.routesOnFloor()) {
+            if (!route.second_path) continue;
+            const selected = route.space_id === state.selected;
+            if (state.selected && !selected) continue;
+            this.polyline(route.second_path, ROUTE_COLORS.second, selected ? 2.5 : 1.2, [6, 4]);
+            if (selected) {
+                const [x, y] = route.second_point;
+                this.dot(x, y, 4, ROUTE_COLORS.second);
+            }
+        }
         const sel = state.selected && res.routes.find(r => r.space_id === state.selected);
         if (sel && sel.diagnosis && sel.diagnosis.cell && sel.diagnosis.cell[2] === state.currentFloor) {
             const [x, y] = sel.diagnosis.cell;
@@ -237,8 +248,9 @@ export class PlanView {
     }
 
     // path points are [row, col, floor]; only the current floor's parts are drawn
-    polyline(path, color, width) {
+    polyline(path, color, width, dash = null) {
         const ctx = this.ctx;
+        ctx.setLineDash(dash ? dash.map(d => d / this.scale) : []);
         ctx.beginPath();
         let drawing = false;
         for (const [x, y, f] of path) {
@@ -248,8 +260,9 @@ export class PlanView {
         ctx.strokeStyle = color;
         ctx.lineWidth = Math.max(width / this.scale, 0.15);
         ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
+        ctx.lineCap = dash ? 'butt' : 'round';
         ctx.stroke();
+        ctx.setLineDash([]);
     }
 
     dot(row, col, radiusPx, color) {

@@ -192,7 +192,12 @@ def test_furthest_point_is_exact_and_second_exit_matches_brute_force():
     both = np.sort(np.stack([d[idx] for d in per_exit]), axis=0)
     # the route is straightened: at most the grid length, and at least 1/1.083 of it (octile overestimate)
     assert both[0].max() * GS / 1.0825 <= route['distance'] <= both[0].max() * GS + 1e-9
-    assert route['second_exit_distance'] == pytest.approx(both[1].max() * GS, rel=1e-6)
+    # the second exit's route is straightened too, from the worst point for it to the other exit
+    assert both[1].max() * GS / 1.0825 <= route['second_exit_distance'] <= both[1].max() * GS + 1e-9
+    second = route['second_path']
+    assert second[0] == route['second_point'] and second[-1] in exits
+    own_nearest = min(exits, key=lambda e: per_exit[exits.index(e)][pf.index(route['second_point'])])
+    assert second[-1] != own_nearest   # the second route goes to the other exit
     assert route['exits_reachable'] == 2
     assert route['optimal_path'][0] == route['furthest_point']
     assert route['optimal_path'][-1] in exits

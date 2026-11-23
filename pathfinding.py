@@ -449,6 +449,8 @@ class Pathfinder:
             'exits_reachable': 0,
             'second_exit_distance': None,
             'second_exit_beyond': None,
+            'second_point': None,     # the point of the space furthest from a second exit
+            'second_path': None,      # its (straightened) route to the nearest other exit
             'unreachable_cells': int(len(points) - reachable.sum()),
             'space_name': space['name'],
             'space_polygon': space.get('polygon'),
@@ -488,7 +490,14 @@ class Pathfinder:
         if second is not None and result['exits_reachable'] >= 2:
             s = second[nodes[reachable]]
             if np.isfinite(s).all():
-                result['second_exit_distance'] = float(s.max() * self.grid_size)
+                worst = int(nodes[reachable][np.argmax(s)])
+                route = self._second_route(worst, int(nearest_group[worst]), groups)
+                if route:
+                    straight = self.smooth_path(route)
+                    result.update({'second_exit_distance': self._calculate_real_distance(straight),
+                                   'second_point': self.node(worst), 'second_path': straight})
+                else:
+                    result['second_exit_distance'] = float(s.max() * self.grid_size)
             else:
                 result['second_exit_beyond'] = SECOND_EXIT_SEARCH_LIMIT
 
@@ -502,6 +511,25 @@ class Pathfinder:
             'exit_kind': group['kind'],
         })
         return result
+
+    def _second_route(self, start: int, nearest_group: int, groups) -> Optional[List[Tuple[int, int, int]]]:
+        """Route on its floor from a cell to the nearest exit other than its nearest one (within the search limit)."""
+        limit = SECOND_EXIT_SEARCH_LIMIT / self.grid_size
+        dist, pred = dijkstra(self.planar, directed=True, indices=start, return_predecessors=True, limit=limit)
+        best = None
+        for gi, g in enumerate(groups):
+            if gi == nearest_group:
+                continue
+            d = dist[g['nodes']]
+            k = int(np.argmin(d))
+            if np.isfinite(d[k]) and (best is None or d[k] < best[0]):
+                best = (d[k], int(g['nodes'][k]))
+        if best is None:
+            return None
+        path = [best[1]]
+        while path[-1] != start and pred[path[-1]] >= 0:
+            path.append(int(pred[path[-1]]))
+        return [self.node(i) for i in reversed(path)]
 
     def _visible(self, f: int, a, b) -> bool:
         """A straight walk from cell a to cell b on floor f stays on passable cells, checked along the centre line and
