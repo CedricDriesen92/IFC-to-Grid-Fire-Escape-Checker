@@ -154,6 +154,63 @@ def test_door_data_decides_over_geometry():
     assert [e[0] for e in exits] == [15]
 
 
+def test_facade_door_counts_when_the_ifc_marks_every_door_interior():
+    # Revit writes IsExternal FALSE for every door left on Function "Interior": with no door flagged TRUE on the
+    # evacuation level, the flags are not used and the outside region decides.
+    from pathfinding import detect_exits_with_note
+    f0, _ = two_storey_box()
+    for c in (14, 15):
+        f0[24][c] = 'door'       # in the façade
+        f0[15][c] = 'door'       # inside
+    doors = [{'floor': 0, 'cells': [24, 24, 14, 15], 'is_external': False},
+             {'floor': 0, 'cells': [15, 15, 14, 15], 'is_external': False}]
+    exits, note = detect_exits_with_note([f0], GS, [{'elevation': 0.0}], {}, doors)
+    assert [e[0] for e in exits] == [24]
+    assert note == {'marked_interior': 1, 'open_envelope': []}
+
+
+def test_recessed_entrance_is_found_by_the_outside_region():
+    # A door at the back of a porch whose straight lines out are all blocked: a screen wall in front of it and
+    # porch walls on both sides, with the way out round the corner of the screen.
+    g = [['empty'] * 40 for _ in range(40)]
+    for r in range(5, 25):
+        for c in range(5, 25):
+            g[r][c] = 'floor'
+    for i in range(5, 25):
+        g[5][i] = g[24][i] = g[i][5] = g[i][24] = 'wall'
+    for r in range(25, 31):
+        g[r][10] = g[r][19] = 'wall'          # porch side walls
+    for c in range(12, 20):
+        g[28][c] = 'wall'                     # screen, open at columns 11
+    for r in range(25, 28):
+        for c in range(11, 19):
+            g[r][c] = 'floor'
+    for c in (14, 15):
+        g[24][c] = 'door'
+    for c in range(10, 20):
+        g[31][c] = 'wall'                     # the porch continues down to row 30, closed at the bottom...
+    for r in range(28, 31):
+        g[r][11] = 'floor'
+    g[30][10] = 'floor'                       # ...and opens to the left at row 30
+    pf = Pathfinder([g], [g], GS, ONE_FLOOR, {})
+    group = [(24, 14), (24, 15)]
+    assert not Pathfinder._is_exit_group(pf.original_codes[0], group)
+    exits = pf.detect_exits(None)
+    assert [(e[0], e[2]) for e in exits] == [(24, 0)] and pf.exit_note['marked_interior'] == 0
+
+
+def test_outside_walls_with_gaps_fall_back_to_the_line_test():
+    from pathfinding import detect_exits_with_note
+    f0, _ = two_storey_box()
+    for i in range(6, 24):
+        f0[5][i] = 'floor'       # the top wall is missing: the whole floor is reachable from the edge
+    for c in (14, 15):
+        f0[24][c] = 'door'
+    exits, note = detect_exits_with_note([f0], GS, [{'elevation': 0.0, 'name': 'Ground'}], {}, None)
+    assert [e[0] for e in exits] == [24]
+    assert note['open_envelope'] == ['Ground']
+
+
 def test_evacuation_level_uses_the_relative_elevation_of_georeferenced_storeys():
     floors = [{'elevation': 194.95, 'relative_elevation': -3.55},
               {'elevation': 198.5, 'relative_elevation': 0.0},

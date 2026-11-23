@@ -96,15 +96,37 @@ async function openProject(id) {
 }
 
 async function refreshExits() {
-    if (state.project.exits) { state.detectedExits = null; }
-    else if (state.results && state.results.exits_detected) { state.detectedExits = state.results.exits.map(e => e.cell); }
+    if (state.project.exits) { state.detectedExits = null; state.exitsNote = null; }
+    else if (state.results && state.results.exits_detected) {
+        state.detectedExits = state.results.exits.map(e => e.cell);
+        state.exitsNote = state.results.exits_note || null;
+    }
     else {
-        try { state.detectedExits = (await api.exits(state.project.id, null)).detected; } catch (e) { errorToast(e); }
+        try {
+            const r = await api.exits(state.project.id, null);
+            state.detectedExits = r.detected;
+            state.exitsNote = r.note || null;
+        } catch (e) { errorToast(e); }
     }
     const hand = !!state.project.exits;
     const n = (state.project.exits || state.detectedExits || []).length;
     $('exits-mode').textContent = hand ? `${n} exits placed by hand` : `${n} outside doors found`;
     $('exits-reset').classList.toggle('hidden', !hand);
+    renderExitsNote();
+}
+
+// what to check about detected exits: façade doors the IFC marks interior, floors whose outside walls have gaps
+function renderExitsNote() {
+    const note = state.project.exits ? null : state.exitsNote;
+    const lines = [];
+    if (note && note.marked_interior) {
+        lines.push(`The IFC marks ${note.marked_interior === 1 ? 'one of these doors' : `${note.marked_interior} of these doors`} as interior, but ${note.marked_interior === 1 ? 'it opens' : 'they open'} to the outside, so ${note.marked_interior === 1 ? 'it counts' : 'they count'} as ${note.marked_interior === 1 ? 'an exit' : 'exits'}. Check them and remove any that don't lead to the open air.`);
+    }
+    if (note && note.open_envelope && note.open_envelope.length) {
+        lines.push(`The outside walls of ${note.open_envelope.join(', ')} have gaps, so the outside doors there are a rough guess. Check them.`);
+    }
+    $('exits-note').textContent = lines.join(' ');
+    $('exits-note').classList.toggle('hidden', !lines.length);
 }
 
 $('exits-reset').onclick = async () => {
@@ -304,7 +326,11 @@ async function runChecks() {
                 clearTimeout(timer);
                 if (shown) jobDialog.hide();
             }
-            if (state.results.exits_detected) state.detectedExits = state.results.exits.map(e => e.cell);
+            if (state.results.exits_detected) {
+                state.detectedExits = state.results.exits.map(e => e.cell);
+                state.exitsNote = state.results.exits_note || null;
+                renderExitsNote();
+            }
             renderResults(); view.request(); refresh3d();
             steps.set(4, [1, 2, 3]);
             const problems = state.results.routes.filter(r => r.distance == null || Object.values(r.violations).some(v => v.length)).length;

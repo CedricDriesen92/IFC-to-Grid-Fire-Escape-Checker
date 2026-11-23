@@ -28,6 +28,7 @@ export const state = {
     goals: [],
     path: null,
     detectedExits: null,    // [[row, col, floor]] when exits are detected
+    exitsNote: null,        // what to check about them ({marked_interior, open_envelope})
     mode: '2d',
 };
 

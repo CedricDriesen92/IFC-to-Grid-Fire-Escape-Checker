@@ -14,7 +14,7 @@ import numpy as np
 import i18n
 from grid_codec import CODES, NAMES, to_codes, pack
 from grid_management import GridManager, buffer_floor
-from pathfinding import Pathfinder, check_escape_route_rules, detect_exits, required_exits
+from pathfinding import Pathfinder, check_escape_route_rules, detect_exits_with_note, required_exits
 
 PROJECT_DIR = os.path.join('uploads', 'projects')
 UNDO_LIMIT = 200
@@ -58,6 +58,7 @@ class Project:
         self.lock = threading.RLock()
         self.results: Optional[Dict[str, Any]] = None
         self._pathfinder: Optional[Pathfinder] = None
+        self.exit_note: Optional[Dict[str, Any]] = None  # what to check about the detected exits
         self._save_timer: Optional[threading.Timer] = None
         self.buffered = [buffer_floor(c, self.settings['wall_buffer']) for c in self.codes]
 
@@ -244,7 +245,9 @@ class Project:
 
     def detected_exits(self) -> List[List[int]]:
         m = self.meta
-        return [list(e) for e in detect_exits(self.buffered, m['grid_size'], m['floors'], m['bbox'], m.get('doors'), self.codes)]
+        exits, self.exit_note = detect_exits_with_note(self.buffered, m['grid_size'], m['floors'], m['bbox'],
+                                                       m.get('doors'), self.codes)
+        return [list(e) for e in exits]
 
     def compartments(self, spaces: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Fire compartments: those of the IFC (IfcSpatialZone / IfcZone), else one per floor (LG 2.1: a compartment
@@ -318,6 +321,7 @@ class Project:
                 'routes': routes,
                 'exits': exit_cells,
                 'exits_detected': self.exits is None,
+                'exits_note': self.exit_note if self.exits is None else None,
                 'compartments': list(comps.values()),
                 'not_checked': i18n.not_checked(lang),
                 'language': lang,

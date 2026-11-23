@@ -16,7 +16,7 @@ from scipy.spatial import cKDTree
 
 import logging
 
-from grid_codec import NAMES, DOOR, STAIR, PASSABLE, to_codes
+from grid_codec import NAMES, EMPTY, FLOOR, WALL, DOOR, STAIR, WALLA, PASSABLE, to_codes
 import i18n
 
 logging.basicConfig(level=logging.DEBUG)
@@ -39,6 +39,9 @@ MAX_TRAVEL_DISTANCES = {
 }
 # Second exits further than this (metres) are reported as "more than" it instead of measured.
 SECOND_EXIT_SEARCH_LIMIT = 100.0
+# Above this share of a floor's floor cells reachable from the grid's edge, the outside walls have gaps (glazing or
+# walls missing from the model) and the outside region says little: doors are then tested by a straight line.
+OPEN_ENVELOPE_SHARE = 0.3
 
 # What the grid cannot show; reported with the results so a pass is not read as full compliance.
 NOT_CHECKED = i18n.not_checked('en')
@@ -228,10 +231,16 @@ class Pathfinder:
     def detect_exits(self, doors: Optional[List[Dict[str, Any]]] = None, evacuation_floors: Optional[List[int]] = None) -> List[Tuple[int, int, int]]:
         """Doors to the open air on the evacuation level.
 
-        A door group leads outside when a door of the IFC data covering it has IsExternal TRUE. When none of its
-        doors says (no data, or an old grid file), the geometric test decides: a straight clear line from the door
-        to the edge of the grid. Upper floors have no doors to the open air that count (LG 4.4.1.2), so a balcony
-        door is never one.
+        IFC data first: a door group with a door of IsExternal TRUE is an exit, one whose doors all say FALSE is not.
+        A floor without a single door flagged TRUE has no usable flags (Revit, for one, writes FALSE for every door
+        whose family Function was left on Interior), so the geometry decides for all its doors; so it does for doors
+        with no flag (no data, or an old grid file). The geometric test: the door has the outside (the cells reachable
+        from the grid's edge without crossing a wall or door) on one side and the inside on the other. When the
+        outside walls have gaps (OPEN_ENVELOPE_SHARE), a straight clear line from the door to the grid's edge instead.
+        Upper floors have no doors to the open air that count (LG 4.4.1.2), so a balcony door is never one.
+
+        self.exit_note tells what to check: façade doors the IFC marks interior that were taken as exits, and floors
+        whose outside walls have gaps.
 
         Doors are found on the original grid (the wall buffer may block part of a door, which would split it or let
         the line test pass through it); the exit cell is the door cell nearest the door's centre that the buffered
@@ -243,16 +252,59 @@ class Pathfinder:
             doors_by_floor[door.get('floor')].append(door)
 
         exits = []
+        note = {'marked_interior': 0, 'open_envelope': []}
         for floor_index in evacuation_floors:
             original = self.original_codes[floor_index]
-            for door_group in self._group_connected_doors(original):
-                flags = [d.get('is_external') for d in doors_by_floor[floor_index] if _door_covers(d, door_group)]
-                known = [f for f in flags if f is not None]
-                is_exit = any(known) if known else self._is_exit_group(original, door_group)
+            groups = self._group_connected_doors(original)
+            flags = []
+            for door_group in groups:
+                known = [d.get('is_external') for d in doors_by_floor[floor_index] if _door_covers(d, door_group)]
+                flags.append([f for f in known if f is not None])
+            flags_usable = any(any(known) for known in flags)
+            outside, inside, share = self._outside_region(original)
+            open_envelope = share > OPEN_ENVELOPE_SHARE
+            if open_envelope and not all(known and flags_usable for known in flags):  # geometry decides a door
+                note['open_envelope'].append(self.floors[floor_index].get('name') or str(floor_index))
+            for door_group, known in zip(groups, flags):
+                if known and flags_usable:
+                    is_exit = any(known)
+                else:
+                    is_exit = (self._is_exit_group(original, door_group) if open_envelope
+                               else self._opens_outside(door_group, outside, inside))
+                    if is_exit and known:
+                        note['marked_interior'] += 1
                 if is_exit:
                     open_cells = [p for p in door_group if self.passable[floor_index, p[0], p[1]]]
                     exits.append(self._calculate_average_position(door_group, floor_index, open_cells))
+        self.exit_note = note
         return exits
+
+    @staticmethod
+    def _outside_region(floor: np.ndarray):
+        """Outside: the cells reachable from the grid's edge without crossing a wall or door. Inside: the other
+        floor and stair cells. Also the share of the floor cells that is outside."""
+        free = (floor != WALL) & (floor != WALLA) & (floor != DOOR)
+        labels, count = ndimage.label(free)
+        edge = np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]])
+        is_outside = np.zeros(count + 1, bool)
+        is_outside[edge[edge > 0]] = True
+        outside = is_outside[labels]
+        inside = free & ~outside & (floor != EMPTY)
+        floor_cells = int((floor == FLOOR).sum())
+        share = float((outside & (floor == FLOOR)).sum()) / floor_cells if floor_cells else 0.0
+        return outside, inside, share
+
+    @staticmethod
+    def _opens_outside(door_group: List[Tuple[int, int]], outside: np.ndarray, inside: np.ndarray) -> bool:
+        """The door touches the outside on one side and the inside on the other."""
+        cells = np.asarray(door_group)
+        x0, y0 = np.maximum(cells.min(axis=0) - 1, 0)
+        x1, y1 = cells.max(axis=0) + 2
+        box = (slice(x0, x1), slice(y0, y1))
+        door = np.zeros(outside[box].shape, bool)
+        door[cells[:, 0] - x0, cells[:, 1] - y0] = True
+        ring = ndimage.binary_dilation(door, np.ones((3, 3), bool)) & ~door
+        return bool((ring & outside[box]).any() and (ring & inside[box]).any())
 
     @staticmethod
     def _group_connected_doors(floor: np.ndarray) -> List[List[Tuple[int, int]]]:
@@ -267,7 +319,7 @@ class Pathfinder:
     def _is_exit_group(floor: np.ndarray, door_group: List[Tuple[int, int]]) -> bool:
         """A clear straight line (no wall or door) from a cell next to the door to the edge of the grid."""
         rows, cols = floor.shape
-        stop = (floor == DOOR) | (floor == 2)  # door or wall
+        stop = (floor == DOOR) | (floor == WALL)
         for x, y in door_group:
             for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
                 nx_, ny_ = x + dx, y + dy
@@ -697,8 +749,15 @@ def find_path(grids, grid_size: float, floors: List[Dict[str, float]], bbox: Dic
 def detect_exits(grids, grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float],
                  doors: Optional[List[Dict[str, Any]]] = None, original_grids=None) -> List[Tuple[int, int, int]]:
     """grids are the grids routes run on (buffered); original_grids, when given, the unbuffered ones doors are read from."""
+    return detect_exits_with_note(grids, grid_size, floors, bbox, doors, original_grids)[0]
+
+
+def detect_exits_with_note(grids, grid_size: float, floors: List[Dict[str, float]], bbox: Dict[str, float],
+                           doors: Optional[List[Dict[str, Any]]] = None, original_grids=None):
+    """detect_exits, and what to check about them (Pathfinder.detect_exits, exit_note)."""
     pathfinder = Pathfinder(original_grids if original_grids is not None else grids, grids, grid_size, floors, bbox)
-    return pathfinder.detect_exits(doors)
+    exits = pathfinder.detect_exits(doors)
+    return exits, pathfinder.exit_note
 
 
 def check_escape_route_rules(route, grid_size, require_second_exit: bool = False, occupancy: Optional[float] = None,

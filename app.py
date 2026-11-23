@@ -528,7 +528,8 @@ def project_exits(pid):
     if not project:
         return not_found()
     project.set_exits((request.json or {}).get('exits'))
-    return jsonify({'exits': project.exits, 'detected': project.detected_exits() if project.exits is None else None})
+    detected = project.detected_exits() if project.exits is None else None
+    return jsonify({'exits': project.exits, 'detected': detected, 'note': project.exit_note if detected is not None else None})
 
 
 @app.route('/api/projects/<pid>/overrides', methods=['POST'])
