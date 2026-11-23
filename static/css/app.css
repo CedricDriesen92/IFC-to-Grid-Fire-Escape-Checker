@@ -34,7 +34,10 @@
 #results-table tr.row { cursor: pointer; }
 #results-table tr.row:hover { background: #3a3a3a; }
 #results-table tr.row.selected { background: #410B13; }
-#results-table select { background: transparent; }
+#results-table select { background: #2D2D2D; color: #e5e7eb; border-radius: 0.25rem; }
+/* the open list of a dropdown: dark like the page, so light text stays readable */
+select, select option { color-scheme: dark; }
+select option { background: #2D2D2D; color: #e5e7eb; }
 .dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 999px; }
 .dot.ok { background: #22c55e; } .dot.day { background: #ef4444; } .dot.night { background: #f59e0b; } .dot.none { background: #6b7280; }
 .badge-warn { background: #78350f; color: #fde68a; border-radius: 0.3rem; padding: 0.05rem 0.4rem; font-size: 0.7rem; }
