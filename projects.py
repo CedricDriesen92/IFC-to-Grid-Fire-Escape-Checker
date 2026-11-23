@@ -21,7 +21,7 @@ UNDO_LIMIT = 200
 SAVE_DELAY = 2.0  # seconds after the last change
 
 DEFAULT_SETTINGS = {
-    'wall_buffer': 4,            # cells; the clear width is 2 * wall_buffer cells
+    'wall_buffer': None,         # cells; the clear width is 2 * wall_buffer cells (default: 0.80 m, see Project)
     'allow_diagonal': True,
     'minimize_cost': False,
     'space_source': 'ifc',       # 'ifc' (IfcSpaces, detected where none) or 'detected'
@@ -47,6 +47,8 @@ class Project:
         self.meta = meta
         self.codes = [np.ascontiguousarray(c, dtype=np.uint8) for c in codes]
         self.settings = {**DEFAULT_SETTINGS, **(settings or {})}
+        if self.settings['wall_buffer'] is None:   # 0.80 m clear width (LG 4.4.1.1) at any grid size
+            self.settings['wall_buffer'] = max(1, round(0.4 / float(meta['grid_size'])))
         self.overrides = {'use': {}, 'occupancy': {}, **(overrides or {})}
         self.exits = exits            # None: detected; else exits placed by hand
         self.created = created or _now()
@@ -285,17 +287,24 @@ class Project:
                         'spaces': [s['id'] for s in c['spaces']]}
         return out
 
-    def analyse(self) -> Dict[str, Any]:
+    def analyse(self, progress=None) -> Dict[str, Any]:
+        """Run the checks; progress(fraction, message), if given, hears each step (as the IFC conversion does)."""
+        report = progress or (lambda fraction, message: None)
         with self.lock:
             t0 = time.time()
             lang = self.settings.get('language', 'en')
+            report(0.0, "Finding the spaces")
             spaces = self.spaces()
             comps = self.compartments(spaces)
+            report(0.1, "Finding the exits")
             exits = self.exits if self.exits is not None else self.detected_exits()
+            if self._pathfinder is None:
+                report(0.15, "Building the walking graph")
             pf = self.pathfinder()
             with_second = any(c['needed'] >= 2 for c in comps.values())
             routes = pf.calculate_escape_routes(spaces, exits, bool(self.settings['stairs_as_exits']), with_second,
-                                                self.meta.get('doors'))
+                                                self.meta.get('doors'), lambda f, m: report(0.25 + 0.7 * f, m))
+            report(0.96, "Checking the rules")
             for space, route in zip(spaces, routes):
                 use = self.overrides['use'].get(space['id']) or space.get('use')
                 source = 'set' if space['id'] in self.overrides['use'] else space.get('use_source')
@@ -339,6 +348,7 @@ class Project:
             target = os.path.join(self.directory, 'model.ifc')
             shutil.copyfile(path, target)
             self.meta['ifc_file'] = target
+            self.meta['ifc_files'] = [target]
             self.save()
 
     # ---------------------------------------------------------------- exports
@@ -390,14 +400,19 @@ class ProjectStore:
         self.lock = threading.Lock()
 
     def create(self, name: str, meta: Dict[str, Any], codes: List[np.ndarray], settings=None, overrides=None,
-               exits=None, ifc_path: Optional[str] = None) -> Project:
+               exits=None, ifc_path: Optional[str] = None, ifc_paths: Optional[List[str]] = None) -> Project:
         pid = uuid.uuid4().hex[:12]
         project = Project(pid, name, meta, codes, settings, overrides, exits)
         os.makedirs(project.directory, exist_ok=True)
-        if ifc_path:
-            target = os.path.join(project.directory, 'model.ifc')
-            shutil.copyfile(ifc_path, target)
-            project.meta['ifc_file'] = target
+        paths = ifc_paths or ([ifc_path] if ifc_path else [])
+        if paths:
+            targets = []
+            for i, path in enumerate(paths):
+                target = os.path.join(project.directory, 'model.ifc' if len(paths) == 1 else f'model_{i}.ifc')
+                shutil.copyfile(path, target)
+                targets.append(target)
+            project.meta['ifc_file'] = targets[0]
+            project.meta['ifc_files'] = targets
         project.save()
         with self.lock:
             self.projects[pid] = project

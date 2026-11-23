@@ -428,6 +428,7 @@ def project_dir(monkeypatch):
     import app as app_module
     directory = tempfile.mkdtemp(prefix='escape_projects_')
     monkeypatch.setattr(projects, 'PROJECT_DIR', directory)
+    monkeypatch.setitem(app_module.app.config, 'UPLOAD_FOLDER', os.path.join(directory, 'uploads'))
     yield directory
     for project in app_module.store.projects.values():   # no autosave after the test, into the real folder
         project.cancel_save()
@@ -557,3 +558,113 @@ def test_project_paths_exits_floors_and_attached_ifc(client, project_dir):
         with open(ifc, 'rb') as f:
             assert client.post(f'/api/projects/{pid}/ifc', data={'file': (f, 'Duplex.ifc')}, content_type='multipart/form-data').status_code == 200
         assert project.meta['ifc_file'].endswith('model.ifc')
+
+
+# ------------------------------------------------------------ several files
+
+@pytest.fixture
+def duplex_halves():
+    """Duplex split in two files: walls (and windows, coverings) in one, everything else in the other."""
+    import shutil
+    import tempfile
+    import ifcopenshell
+    import ifcopenshell.api
+    if not os.path.exists(DUPLEX):
+        pytest.skip('example file missing')
+    directory = tempfile.mkdtemp(prefix='escape_split_')
+    walls = ('IfcWall', 'IfcWindow', 'IfcCurtainWall', 'IfcColumn', 'IfcCovering')
+    paths = []
+    for keep_walls, name in ((True, 'walls.ifc'), (False, 'rest.ifc')):
+        model = ifcopenshell.open(DUPLEX)
+        doomed = [e.id() for e in model.by_type('IfcBuildingElement') + model.by_type('IfcSpace')
+                  if any(e.is_a(c) for c in walls) != keep_walls]
+        for i in doomed:
+            try:
+                ifcopenshell.api.run('root.remove_product', model, product=model.by_id(i))
+            except Exception:
+                pass  # removed with its parent already
+        path = os.path.join(directory, name)
+        model.write(path)
+        paths.append(path)
+    yield paths
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_parts_of_a_building_convert_like_the_whole(duplex_halves):
+    from ifc_processing import process_ifc_file
+    whole = process_ifc_file(DUPLEX, GS)
+    parts = process_ifc_file(duplex_halves, GS)
+    assert [np.array(g).shape for g in parts['grids']] == [np.array(g).shape for g in whole['grids']]
+    assert all(np.array_equal(np.array(a), np.array(b)) for a, b in zip(whole['grids'], parts['grids']))
+    assert [f['name'] for f in parts['floors']] == [f['name'] for f in whole['floors']]
+    assert all(len(f['guids']) == 2 and all(f['guids']) for f in parts['floors'])   # each file's storey kept
+    assert len(parts['ifc_spaces']) == len(whole['ifc_spaces']) and len(parts['doors']) == len(whole['doors'])
+
+
+def test_several_files_in_one_project(client, project_dir, duplex_halves):
+    import time as _time
+    files = [(open(p, 'rb'), os.path.basename(p)) for p in duplex_halves]
+    try:
+        r = client.post('/api/projects', data={'file': files, 'grid_size': str(GS)}, content_type='multipart/form-data')
+    finally:
+        for f, _ in files:
+            f.close()
+    assert r.status_code == 202
+    job = r.get_json()['job_id']
+    for _ in range(200):
+        status = client.get(f'/api/jobs/{job}').get_json()
+        if status['status'] != 'running':
+            break
+        _time.sleep(0.1)
+    assert status['status'] == 'done', status
+    pid = status['result']['project_id']
+    state = client.get(f'/api/projects/{pid}').get_json()
+    assert state['meta']['source_files'] == ['walls.ifc', 'rest.ifc'] and len(state['meta']['ifc_files']) == 2
+    assert client.post(f'/api/projects/{pid}/analyse').get_json()['routes']
+    for index in (0, 1):
+        export = client.get(f'/api/projects/{pid}/export/ifc?file={index}')
+        assert export.status_code == 200 and ('walls' if index == 0 else 'rest') in export.headers['Content-Disposition']
+    mixed = client.post('/api/projects', data={'file': [(io.BytesIO(b'{}'), 'g.json'), (open(duplex_halves[0], 'rb'), 'a.ifc')]},
+                        content_type='multipart/form-data')
+    assert mixed.status_code == 400
+
+
+def test_default_clear_width_is_0_8_m_at_any_grid_size():
+    from projects import Project
+    for gs, cells in ((0.1, 4), (0.05, 8), (0.025, 16), (0.2, 2)):
+        meta = {'grid_size': gs, 'floors': [{'elevation': 0.0, 'height': 3.0}], 'bbox': {'min_x': 0.0, 'min_y': 0.0}}
+        project = Project('x', 'x', meta, [np.zeros((4, 4), np.uint8)])
+        assert project.settings['wall_buffer'] == cells
+
+
+def test_too_fine_a_grid_is_refused_with_a_suggestion():
+    from ifc_processing import IFCProcessor
+    proc = IFCProcessor('unused', 0.01)
+    proc.bbox = {'min_x': 0.0, 'min_y': 0.0, 'max_x': 300.0, 'max_y': 300.0}
+    proc.floors = [{'elevation': 0.0}] * 10
+    with pytest.raises(ValueError, match='use a grid size'):
+        proc.create_grids()
+
+
+def test_checks_run_in_the_background_with_progress(client, project_dir):
+    import json as _json
+    import time as _time
+    import app as app_module
+    g = l_shaped_floor()
+    data = {'grids': pack(to_codes([g])), 'grid_size': GS, 'floors': [{'elevation': 0.0, 'height': 3.0}],
+            'bbox': {'min_x': 0.0, 'min_y': 0.0}}
+    pid = client.post('/api/projects', data={'file': (io.BytesIO(_json.dumps(data).encode()), 'g.json')},
+                      content_type='multipart/form-data').get_json()['project']['id']
+    seen = []
+    results = app_module.store.get(pid).analyse(lambda f, m: seen.append((f, m)))
+    assert results['routes'] and seen[0][1] == 'Finding the spaces' and seen[-1][1] == 'Checking the rules'
+    assert all(a[0] <= b[0] for a, b in zip(seen, seen[1:]))           # progress only goes forward
+    r = client.post(f'/api/projects/{pid}/analyse?background=1')
+    assert r.status_code == 202
+    job = r.get_json()['job_id']
+    for _ in range(100):
+        status = client.get(f'/api/jobs/{job}').get_json()
+        if status['status'] != 'running':
+            break
+        _time.sleep(0.05)
+    assert status['status'] == 'done' and status['result']['results']['routes']

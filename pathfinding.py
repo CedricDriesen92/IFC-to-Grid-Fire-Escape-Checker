@@ -385,7 +385,7 @@ class Pathfinder:
             path.append(int(pred[path[-1]]))
         return [self.node(i) for i in path]
 
-    def exit_field(self, groups: List[Dict[str, Any]], with_second: bool = False):
+    def exit_field(self, groups: List[Dict[str, Any]], with_second: bool = False, progress=None):
         """Per cell: distance (grid cells, own floor only) to the nearest exit's access, the predecessor towards it
         and that exit's group; with_second also the distance to the nearest other exit (up to
         SECOND_EXIT_SEARCH_LIMIT, inf beyond)."""
@@ -409,6 +409,8 @@ class Pathfinder:
             second = np.full(self.N, np.inf)
             limit = SECOND_EXIT_SEARCH_LIMIT / self.grid_size
             for gi, g in enumerate(groups):
+                if progress:
+                    progress(gi / max(len(groups), 1), f"Distances to a second exit ({gi + 1} of {len(groups)} exits)")
                 d = dijkstra(self.planar, directed=True, indices=g['nodes'], min_only=True, limit=limit)
                 other = nearest_group != gi
                 np.minimum(second, np.where(other, d, np.inf), out=second)
@@ -418,10 +420,18 @@ class Pathfinder:
 
     def calculate_escape_routes(self, spaces: List[Dict[str, Any]], exits: List[Tuple[int, int, int]],
                                 stairs_as_exits: bool = True, with_second: bool = True,
-                                doors: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+                                doors: Optional[List[Dict[str, Any]]] = None, progress=None) -> List[Dict[str, Any]]:
+        """progress(fraction, message), if given, hears how far the distances and the routes per space are."""
+        report = progress or (lambda fraction, message: None)
         groups = self.exit_groups(exits, stairs_as_exits, doors, spaces)
-        field = self.exit_field(groups, with_second)
-        return [self._route_for_space(space, groups, field) for space in spaces]
+        report(0.0, "Distances to the nearest exit")
+        field = self.exit_field(groups, with_second, lambda f, m: report(0.05 + 0.25 * f, m))
+        routes = []
+        for i, space in enumerate(spaces):
+            if i % 5 == 0:
+                report(0.3 + 0.7 * i / max(len(spaces), 1), f"Routes per space ({i} of {len(spaces)})")
+            routes.append(self._route_for_space(space, groups, field))
+        return routes
 
     def calculate_escape_route(self, space: Dict[str, Any], exits: List[Tuple[int, int, int]], spaces: List[Dict[str, Any]] = None,
                                stairs_as_exits: bool = True, with_second: bool = True) -> Dict[str, Any]:

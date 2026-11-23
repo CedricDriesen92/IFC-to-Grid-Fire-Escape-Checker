@@ -14,12 +14,15 @@ Run it with `pip install -r requirements.txt` and `python app.py`, then open htt
 The sidebar has four steps, and the results open on the right.
 
 1. Model: load an `.ifc` (converted in the background) or a saved grid `.json`, with an optional mapping file (see
-   below). Each model becomes a project that saves as you work, in `uploads/projects/`. Recent projects reopen from
-   the list, and the page address reopens the same project after a reload.
+   below). You can also select several IFC files of one building, such as parts or disciplines (architecture with
+   the slabs in the structural model, say); they must share one coordinate system. Storeys of different files within
+   0.5 m of each other become one floor. Each model becomes a project that saves as you work, in
+   `uploads/projects/`. Recent projects reopen from the list, and the page address reopens the same project after a
+   reload.
 2. Check the grid: paint walls, doors, stairs, floor or empty cells with the brush, line and fill tools, and undo with
    Ctrl+Z. Set the clear width (0.80 m is the LG minimum), place exits by hand, or find a path between two points.
 3. Check the routes: choose IfcSpaces or detected spaces and a default occupancy, then run the checks.
-4. Export the PDF report, the IFC with routes, or the grid file.
+4. Export the PDF report, the IFC with routes (into the file you pick, for a project of several files), or the grid file.
 
 The results list each space with its status, use (day or night, editable), distance to the exit, kind of exit and
 distance to a second exit. Click a space to see its route on the plan. A space without a route says why: no exit on

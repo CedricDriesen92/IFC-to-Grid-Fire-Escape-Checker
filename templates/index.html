@@ -55,10 +55,12 @@
                 <h2 class="step-title"><span class="step-no">1</span> Model</h2>
                 <div class="step-body space-y-2">
                     <form id="upload-form" class="space-y-2">
-                        <input id="file-input" type="file" name="file" accept=".ifc,.json" class="w-full text-xs">
+                        <input id="file-input" type="file" name="file" accept=".ifc,.json" multiple class="w-full text-xs"
+                               title="One IFC, several IFC files of one building (parts or disciplines, aligned), or a saved grid file">
                         <div class="flex items-center gap-2">
                             <label for="grid-size" class="w-24">Grid size (m)</label>
-                            <input type="number" id="grid-size" name="grid_size" value="0.1" step="0.05" min="0.05" max="0.5" class="inp w-20">
+                            <input type="number" id="grid-size" name="grid_size" value="0.1" step="0.01" min="0.01" max="0.5" class="inp w-20"
+                                   title="Smaller cells are more precise but slower: 0.05 m makes four times as many cells as 0.1 m">
                         </div>
                         <details>
                             <summary class="cursor-pointer text-gray-400" title="Maps proxies and other elements to stairs, floors, walls or doors. Example in mappings/">Element mapping (optional)</summary>
@@ -169,6 +171,10 @@
                         <button id="export-pdf" class="btn">PDF report</button>
                         <button id="export-ifc" class="btn">IFC + routes</button>
                         <button id="export-grid" class="btn">Grid file</button>
+                    </div>
+                    <div id="export-target-row" class="flex items-center gap-2 hidden">
+                        <label for="export-target" class="w-24">Routes into</label>
+                        <select id="export-target" class="inp flex-1"></select>
                     </div>
                     <input id="attach-ifc" type="file" accept=".ifc" class="hidden">
                     <p id="attach-ifc-note" class="text-xs text-gray-400 hidden">Made from a grid file: "IFC + routes" asks for the IFC.</p>

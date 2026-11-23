@@ -34,10 +34,12 @@ async function loadRecent() {
 
 $('upload-form').addEventListener('submit', async e => {
     e.preventDefault();
-    const file = $('file-input').files[0];
-    if (!file) { toast('Choose an .ifc or grid .json file first', 'warn'); return; }
+    const files = [...$('file-input').files];
+    if (!files.length) { toast('Choose an .ifc or grid .json file first', 'warn'); return; }
+    const file = files[0];
+    const label = files.length > 1 ? `${files.length} files` : file.name;
     const form = new FormData();
-    form.append('file', file);
+    files.forEach(f => form.append('file', f));
     form.append('grid_size', $('grid-size').value);
     const mapping = $('mapping-input').files[0];
     if (mapping) form.append('mapping_file', mapping);
@@ -47,13 +49,13 @@ $('upload-form').addEventListener('submit', async e => {
             const res = await api.createProject(form);
             let id;
             if (res.job_id) {
-                jobDialog.show(`Converting ${file.name}`);
+                jobDialog.show(`Converting ${label}`);
                 try {
                     id = (await waitForJob(res.job_id, (f, m) => jobDialog.update(f, m))).project_id;
                 } finally { jobDialog.hide(); }
             } else id = res.project.id;
             await openProject(id);
-            toast(`${file.name} loaded`, 'success');
+            toast(`${label} loaded`, 'success');
             loadRecent();
         } catch (err) { errorToast(err); }
     });
@@ -87,6 +89,9 @@ async function openProject(id) {
         if (w.skipped_elements) toast(`No geometry, so missing from the grid: ${Object.entries(w.skipped_elements).map(([k, v]) => `${v} ${k}`).join(', ')}`, 'warn', 12000);
         if (w.spaces_on_no_floor) toast(`IfcSpaces on no floor, not checked: ${w.spaces_on_no_floor.join(', ')}`, 'warn', 8000);
         $('attach-ifc-note').classList.toggle('hidden', !!p.meta.ifc_file);
+        const sources = p.meta.source_files || [];
+        $('export-target-row').classList.toggle('hidden', sources.length < 2);
+        $('export-target').innerHTML = sources.map((n, i) => `<option value="${i}">${n.replace(/</g, '&lt;')}</option>`).join('');
     } catch (e) { errorToast(e); }
 }
 
@@ -156,10 +161,13 @@ $('floor-remove').onclick = () => floorAction('remove');
 
 // ------------------------------------------------------------------ settings
 
+// Clear widths as whole numbers of cells on each side (the buffer), at the widths that matter, for any grid size.
 function clearWidthOptions() {
     const gs = state.project.meta.grid_size, sel = $('clear-width');
+    const buffers = new Set([0, state.project.settings.wall_buffer]);
+    for (const w of [0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.5]) buffers.add(Math.max(1, Math.round(w / 2 / gs)));
     sel.innerHTML = '';
-    for (let b = 0; b <= 10; b++) {
+    for (const b of [...buffers].sort((a, c) => a - c)) {
         const w = 2 * b * gs;
         const o = document.createElement('option');
         o.value = b;
@@ -286,7 +294,16 @@ async function runChecks() {
     await busy($('run-checks'), async () => {
         try {
             await whenSaved();
-            state.results = await api.analyse(state.project.id);
+            // progress as for loading a model; the dialog only shows when the run takes longer than half a second
+            const { job_id } = await api.analyseJob(state.project.id);
+            let shown = false, last = [0, ''];
+            const timer = setTimeout(() => { shown = true; jobDialog.show('Checking the routes'); jobDialog.update(...last); }, 500);
+            try {
+                state.results = (await waitForJob(job_id, (f, m) => { last = [f, m]; if (shown) jobDialog.update(f, m); }, 300)).results;
+            } finally {
+                clearTimeout(timer);
+                if (shown) jobDialog.hide();
+            }
             if (state.results.exits_detected) state.detectedExits = state.results.exits.map(e => e.cell);
             renderResults(); view.request(); refresh3d();
             steps.set(4, [1, 2, 3]);
@@ -338,7 +355,8 @@ on('hover', cell => {
 async function exportKind(kind, button) {
     if (!state.project) return;
     await busy(button, async () => {
-        try { await download(api.exportUrl(state.project.id, kind, kind === 'pdf' ? $('language').value : null)); }
+        const query = kind === 'pdf' ? { lang: $('language').value } : kind === 'ifc' ? { file: $('export-target').value || 0 } : null;
+        try { await download(api.exportUrl(state.project.id, kind, query)); }
         catch (e) { errorToast(e); }
     });
 }

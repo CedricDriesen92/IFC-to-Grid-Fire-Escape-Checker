@@ -34,6 +34,10 @@ ALL_TYPES = WALL_TYPES + FLOOR_TYPES + DOOR_TYPES + STAIR_TYPES
 # Floor finishes and ceilings lie flat on or above a floor: read as walls they would block whole rooms.
 IGNORED_COVERING_TYPES = {'FLOORING', 'CEILING'}
 TYPE_PRECEDENCE = {'door': 0, 'stair': 1, 'wall': 2, 'floor': 3}
+# Storeys of different files of one building (parts, disciplines) within this height of each other are one floor.
+STOREY_MERGE_TOLERANCE = 0.5
+# Largest grid (cells over all floors) a conversion makes; smaller grid sizes on big models need far more memory.
+MAX_GRID_CELLS = 60_000_000
 
 
 # Names that suggest sleeping occupants, for spaces without an OccupancyType (a guess, shown as such in the app).
@@ -267,11 +271,18 @@ def door_rectangle(points: np.ndarray, extension: float = 0.0) -> np.ndarray:
 
 
 class IFCProcessor:
-    def __init__(self, file_path: str, grid_size: float = 0.1, mapping: Any = None, progress=None):
-        self.file_path = file_path
+    """One IFC file, or several files of one building (parts or disciplines) that share one coordinate system.
+
+    Elements are keyed (file index, step id), since step ids repeat across files."""
+
+    def __init__(self, file_path: Any, grid_size: float = 0.1, mapping: Any = None, progress=None):
+        self.file_paths = [file_path] if isinstance(file_path, (str, os.PathLike)) else list(file_path)
+        self.file_path = self.file_paths[0] if self.file_paths else None
+        self.ifc_files = []
+        self._file_index = 0          # file being read by collect_targets
         self.grid_size = grid_size
         self.mapping = load_mapping(mapping)
-        self.flat_stairs = set()      # step ids of flat stair symbols (mapping "flat_stair")
+        self.flat_stairs = set()      # keys of flat stair symbols (mapping "flat_stair")
         self.compartments = []
         self._progress = progress
         self.ifc_file = None
@@ -284,8 +295,8 @@ class IFCProcessor:
         self.space_elements = []
         self.dropped_spaces = []  # IfcSpaces on no grid floor (a roof, a storey left out)
         self.doors = []
-        self.targets = {}   # step id -> (instance, element type)
-        self.shapes = {}    # step id -> (verts (n, 3), faces (m, 3)) in world metres
+        self.targets = {}   # (file index, step id) -> (instance, element type)
+        self.shapes = {}    # (file index, step id) -> (verts (n, 3), faces (m, 3)) in world metres
         self.skipped = Counter()
 
     def progress(self, fraction: float, message: str) -> None:
@@ -294,9 +305,11 @@ class IFCProcessor:
 
     def process(self) -> Dict[str, Any]:
         """Turn the IFC file into one grid per floor. Errors are raised, not hidden."""
-        self.progress(0.0, "Reading the IFC file")
-        self.ifc_file = self.load_ifc_file()
-        logger.info("IFC file loaded")
+        count = len(self.file_paths)
+        self.progress(0.0, "Reading the IFC file" if count == 1 else f"Reading {count} IFC files")
+        self.ifc_files = [self.load_ifc_file(path) for path in self.file_paths]
+        self.ifc_file = self.ifc_files[0]
+        logger.info(f"{count} IFC file(s) loaded")
         self.collect_targets()
         self.progress(0.05, "Triangulating elements")
         self.load_shapes()
@@ -330,11 +343,15 @@ class IFCProcessor:
             'warnings': warnings,
         }
 
-    def load_ifc_file(self) -> ifcopenshell.file:
+    def load_ifc_file(self, path: Optional[str] = None) -> ifcopenshell.file:
+        path = path or self.file_path
         try:
-            return ifcopenshell.open(self.file_path)
+            return ifcopenshell.open(path)
         except Exception as e:
-            raise RuntimeError(f"Error loading IFC file: {str(e)}")
+            raise RuntimeError(f"Error loading IFC file {os.path.basename(str(path))}: {str(e)}")
+
+    def files(self) -> List[ifcopenshell.file]:
+        return self.ifc_files or ([self.ifc_file] if self.ifc_file is not None else [])
 
     def collect_targets(self) -> None:
         """Every element of a grid type, and its parts (curtain wall panels, stair flights, ...) with the parent's type.
@@ -342,24 +359,28 @@ class IFCProcessor:
         An element that has a type of its own and is also a part (a door in a curtain wall, a landing slab in a stair)
         gets the stronger of the two, door > stair > wall > floor, as the marking order does."""
         classes = list(ALL_TYPES) + [r['class'] for r in self.mapping if r['class'] not in ALL_TYPES]
-        for cls in classes:
-            try:
-                elements = self.ifc_file.by_type(cls)
-            except RuntimeError:  # a class this schema does not have
-                continue
-            for element in elements:
-                element_type = self.get_element_type(element)
-                if element_type is None:
+        self.space_elements = []
+        for fi, ifc in enumerate(self.files()):
+            self._file_index = fi
+            for cls in classes:
+                try:
+                    elements = ifc.by_type(cls)
+                except RuntimeError:  # a class this schema does not have
                     continue
-                self._add_target(element, element_type)
-                for part in ifcopenshell.util.element.get_parts(element) or []:
-                    self._add_target(part, element_type)
-        self.space_elements = [s for s in self.ifc_file.by_type('IfcSpace') if s.Representation]
+                for element in elements:
+                    element_type = self.get_element_type(element)
+                    if element_type is None:
+                        continue
+                    self._add_target(element, element_type)
+                    for part in ifcopenshell.util.element.get_parts(element) or []:
+                        self._add_target(part, element_type)
+            self.space_elements += [(fi, s) for s in ifc.by_type('IfcSpace') if s.Representation]
 
     def _add_target(self, element, element_type: str) -> None:
-        current = self.targets.get(element.id())
+        key = (self._file_index, element.id())
+        current = self.targets.get(key)
         if current is None or TYPE_PRECEDENCE[element_type] < TYPE_PRECEDENCE[current[1]]:
-            self.targets[element.id()] = (element, element_type)
+            self.targets[key] = (element, element_type)
 
     def load_shapes(self) -> None:
         """Triangulate all targets once with the geometry iterator, which picks each element's Body representation.
@@ -369,45 +390,49 @@ class IFCProcessor:
         self.skipped, so the caller can report them."""
         settings = ifcopenshell.geom.settings()
         settings.set(settings.USE_WORLD_COORDS, True)
-        elements = [inst for inst, _ in self.targets.values() if inst.Representation]
-        instances = elements + self.space_elements
-        if not instances:
-            return
-
-        iterator = ifcopenshell.geom.iterator(settings, self.ifc_file, max(1, multiprocessing.cpu_count() - 1), include=instances)
-        if iterator.initialize():
-            done = 0
-            while True:
-                shape = iterator.get()
-                self._store_shape(shape.id, shape.geometry)
-                done += 1
-                if done % 100 == 0:
-                    self.progress(0.05 + 0.55 * done / len(instances), f"Triangulating elements ({done} of {len(instances)})")
-                if not iterator.next():
-                    break
-
-        for inst in instances:
-            if inst.id() in self.shapes:
+        per_file = []
+        for fi, ifc in enumerate(self.files()):
+            elements = [inst for (kf, _), (inst, _) in self.targets.items() if kf == fi and inst.Representation]
+            per_file.append((fi, ifc, elements + [sp for sf, sp in self.space_elements if sf == fi]))
+        total = sum(len(instances) for _, _, instances in per_file)
+        done = 0
+        for fi, ifc, instances in per_file:
+            if not instances:
                 continue
-            body = next((r for r in inst.Representation.Representations if r.RepresentationIdentifier == 'Body'), None)
-            try:
-                shape = ifcopenshell.geom.create_shape(settings, inst, body)
-                self._store_shape(inst.id(), shape.geometry)
-            except Exception:
-                pass
-            if inst.id() not in self.shapes:
-                self.skipped[inst.is_a()] += 1
-        logger.info(f"Triangulated {len(self.shapes)} of {len(instances)} elements")
+            iterator = ifcopenshell.geom.iterator(settings, ifc, max(1, multiprocessing.cpu_count() - 1), include=instances)
+            if iterator.initialize():
+                while True:
+                    shape = iterator.get()
+                    self._store_shape((fi, shape.id), shape.geometry)
+                    done += 1
+                    if done % 100 == 0:
+                        self.progress(0.05 + 0.55 * done / total, f"Triangulating elements ({done} of {total})")
+                    if not iterator.next():
+                        break
 
-    def _store_shape(self, step_id: int, geometry) -> None:
+            for inst in instances:
+                key = (fi, inst.id())
+                if key in self.shapes:
+                    continue
+                body = next((r for r in inst.Representation.Representations if r.RepresentationIdentifier == 'Body'), None)
+                try:
+                    shape = ifcopenshell.geom.create_shape(settings, inst, body)
+                    self._store_shape(key, shape.geometry)
+                except Exception:
+                    pass
+                if key not in self.shapes:
+                    self.skipped[inst.is_a()] += 1
+        logger.info(f"Triangulated {len(self.shapes)} of {total} elements")
+
+    def _store_shape(self, key, geometry) -> None:
         verts = np.asarray(geometry.verts, dtype=float).reshape(-1, 3)
         faces = np.asarray(geometry.faces, dtype=int).reshape(-1, 3)
         if len(verts) and len(faces):
-            self.shapes[step_id] = (verts, faces)
+            self.shapes[key] = (verts, faces)
 
     def calculate_bounding_box_and_floors(self) -> Tuple[Dict[str, float], List[Dict]]:
         wall_ids = [i for i, (_, t) in self.targets.items() if t == 'wall' and i in self.shapes]
-        space_ids = {s.id() for s in self.space_elements}
+        space_ids = {(fi, sp.id()) for fi, sp in self.space_elements}
         ids = wall_ids or [i for i in self.shapes if i not in space_ids]
         if not ids:
             raise RuntimeError("No walls, slabs, doors or stairs with usable geometry were found in the IFC file")
@@ -421,13 +446,7 @@ class IFCProcessor:
             if size > 1000:
                 logger.warning(f"Unreasonably large bounding box size for {axis}-axis: {size} meters")
 
-        storeys = []
-        seen = set()
-        for storey in sorted(self.storey_elevations(), key=lambda s: s['elevation']):
-            if round(storey['elevation'], 4) in seen:
-                continue
-            seen.add(round(storey['elevation'], 4))
-            storeys.append(storey)
+        storeys = self.merged_storeys()
 
         if not storeys:
             logger.warning("No storeys with an elevation found, creating floors every 3 m")
@@ -449,16 +468,56 @@ class IFCProcessor:
         logger.debug(f"Created {len(floors)} floors: {floors}")
         return bbox, floors
 
-    def storey_elevations(self) -> List[Dict[str, Any]]:
+    def merged_storeys(self) -> List[Dict[str, Any]]:
+        """The storeys of all files as one list of floors, lowest first.
+
+        Within a file, storeys at the same height are one. Across files, a storey within STOREY_MERGE_TOLERANCE of a
+        floor that has no storey of its file yet joins it: the first file's storey gives the floor its height and name,
+        and 'guids' keeps each file's storey (for adding routes to any of the files)."""
+        files = self.files()
+        rows = []
+        for fi, ifc in enumerate(files):
+            seen = set()
+            for storey in self.storey_elevations(ifc):
+                if round(storey['elevation'], 4) in seen:
+                    continue
+                seen.add(round(storey['elevation'], 4))
+                rows.append({**storey, 'file': fi})
+        rows.sort(key=lambda r: (r['elevation'], r['file']))
+        clusters = []
+        for row in rows:
+            for cluster in clusters:
+                if abs(row['elevation'] - cluster[0]['elevation']) <= STOREY_MERGE_TOLERANCE \
+                        and all(c['file'] != row['file'] for c in cluster):
+                    cluster.append(row)
+                    break
+            else:
+                clusters.append([row])
+        storeys = []
+        for cluster in clusters:
+            primary = min(cluster, key=lambda r: r['file'])
+            guids = [None] * len(files)
+            for r in cluster:
+                guids[r['file']] = r['guid']
+            relative = primary['relative_elevation']
+            if relative is None:
+                relative = next((r['relative_elevation'] for r in cluster if r['relative_elevation'] is not None), None)
+            storeys.append({'elevation': primary['elevation'], 'relative_elevation': relative,
+                            'guid': primary['guid'], 'name': primary['name'], 'guids': guids})
+        storeys.sort(key=lambda r: r['elevation'])
+        return storeys
+
+    def storey_elevations(self, ifc: Optional[ifcopenshell.file] = None) -> List[Dict[str, Any]]:
         """World height of each storey in metres, the frame the geometry is in.
 
         IfcBuildingStorey.Elevation is relative to the building, so a georeferenced model (site placed at 198.5 m,
         say) would match no element to any floor. The storey's placement gives its world height; when all storeys
         share one placement height (an exporter that only fills Elevation) that height is the base and Elevation
         is added to it."""
-        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(self.ifc_file)
+        ifc = ifc or self.files()[0]
+        unit_scale = ifcopenshell.util.unit.calculate_unit_scale(ifc)
         rows = []
-        for storey in self.ifc_file.by_type("IfcBuildingStorey"):
+        for storey in ifc.by_type("IfcBuildingStorey"):
             placed = None
             if storey.ObjectPlacement:
                 placed = float(ifcopenshell.util.placement.get_local_placement(storey.ObjectPlacement)[2][3]) * unit_scale
@@ -489,8 +548,11 @@ class IFCProcessor:
         x_cells = int(np.ceil((self.bbox['max_x'] - self.bbox['min_x']) / self.grid_size)) + 6
         y_cells = int(np.ceil((self.bbox['max_y'] - self.bbox['min_y']) / self.grid_size)) + 6
         logger.info(f"Creating grid with dimensions: {x_cells} x {y_cells}")
-        if x_cells > 10000 or y_cells > 10000:
-            logger.warning(f"Very large grid size: {x_cells} x {y_cells}. Use a larger grid size for this model.")
+        cells = x_cells * y_cells * len(self.floors)
+        if cells > MAX_GRID_CELLS:
+            suggestion = self.grid_size * (cells / MAX_GRID_CELLS) ** 0.5
+            raise ValueError(f"A grid of {self.grid_size:g} m needs {cells / 1e6:.0f} million cells for this model "
+                             f"(at most {MAX_GRID_CELLS / 1e6:.0f} million): use a grid size of {suggestion:.2f} m or more")
         return [np.full((x_cells, y_cells), 'empty', dtype=object) for _ in self.floors]
 
     def process_elements(self) -> None:
@@ -527,10 +589,10 @@ class IFCProcessor:
         origin = np.array([self.bbox['min_x'], self.bbox['min_y']])
         shape = self.grids[0].shape if self.grids else (0, 0)
         names = Counter()
-        for space in self.space_elements:
-            if space.id() not in self.shapes:
+        for fi, space in self.space_elements:
+            if (fi, space.id()) not in self.shapes:
                 continue
-            verts, faces = self.shapes[space.id()]
+            verts, faces = self.shapes[(fi, space.id())]
             bottom = float(verts[:, 2].min())
             floor_index = None
             for i, floor in enumerate(self.floors):
@@ -564,9 +626,9 @@ class IFCProcessor:
             text = ' '.join(str(t) for t in (zone.Name, getattr(zone, 'LongName', None), getattr(zone, 'ObjectType', None)) if t)
             return bool(pattern.search(text))
 
-        for zone_class in ('IfcSpatialZone', 'IfcZone'):
+        for zone_class, ifc in [(c, f) for f in self.files() for c in ('IfcSpatialZone', 'IfcZone')]:
             try:
-                zones = self.ifc_file.by_type(zone_class)
+                zones = ifc.by_type(zone_class)
             except RuntimeError:
                 continue
             for zone in zones:
@@ -618,7 +680,7 @@ class IFCProcessor:
         rule = match_mapping(element, self.mapping)
         if rule is not None:
             if rule['flat_stair'] and rule['as'] == 'stair':
-                self.flat_stairs.add(element.id())
+                self.flat_stairs.add((self._file_index, element.id()))
             return None if rule['as'] == 'ignore' else rule['as']
         return get_element_type(element)
 
@@ -722,7 +784,8 @@ class IFCProcessor:
         logger.info(f"Final grid dimensions: {self.grids[0].shape}, bounding box: {self.bbox}")
 
 
-def process_ifc_file(file_path: str, grid_size: float = 0.1, mapping: Any = None, progress=None) -> Dict[str, Any]:
+def process_ifc_file(file_path: Any, grid_size: float = 0.1, mapping: Any = None, progress=None) -> Dict[str, Any]:
+    """file_path: one IFC file, or a list of files of one building (sharing one coordinate system)."""
     processor = IFCProcessor(file_path, grid_size, mapping, progress)
     return processor.process()
 

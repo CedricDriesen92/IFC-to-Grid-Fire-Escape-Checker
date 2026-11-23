@@ -406,12 +406,17 @@ def list_projects():
 
 @app.route('/api/projects', methods=['POST'])
 def create_project():
-    """Upload an IFC (converted in the background: returns a job) or a saved grid JSON (returns the project)."""
-    file = request.files.get('file')
-    if file is None or file.filename == '' or not allowed_file(file.filename):
-        return jsonify({'error': 'Choose an .ifc or a saved grid .json file'}), 400
+    """Upload one or more IFC files of one building (converted together in the background: returns a job), or a
+    saved grid JSON (returns the project)."""
+    uploads = [f for f in request.files.getlist('file') if f and f.filename]
+    if not uploads or not all(allowed_file(f.filename) for f in uploads):
+        return jsonify({'error': 'Choose .ifc files or one saved grid .json file'}), 400
+    is_json = [f.filename.lower().endswith('.json') for f in uploads]
+    if any(is_json) and len(uploads) > 1:
+        return jsonify({'error': 'Load a grid .json file on its own, not together with other files'}), 400
+    file = uploads[0]
     filename = secure_filename(file.filename)
-    name = request.form.get('name') or os.path.splitext(file.filename)[0]
+    name = request.form.get('name') or os.path.splitext(file.filename)[0] + (f" + {len(uploads) - 1}" if len(uploads) > 1 else '')
     if filename.lower().endswith('.json'):
         try:
             data = json.load(file.stream)
@@ -422,8 +427,12 @@ def create_project():
         return jsonify({'project': project.state()}), 201
 
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file.save(path)
+    paths = []
+    for upload in uploads:
+        path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(upload.filename))
+        upload.save(path)
+        paths.append(path)
+    names = [u.filename for u in uploads]
     grid_size = float(request.form.get('grid_size') or 0.1)
     mapping = request.form.get('mapping') or None
     if 'mapping_file' in request.files and request.files['mapping_file'].filename:
@@ -436,14 +445,15 @@ def create_project():
             return jsonify({'error': f'Mapping file: {e}'}), 400
 
     def work(progress):
-        result = process_ifc_file(path, grid_size, mapping, progress)
+        result = process_ifc_file(paths if len(paths) > 1 else paths[0], grid_size, mapping, progress)
         meta = {k: result[k] for k in ('grid_size', 'floors', 'bbox', 'doors', 'ifc_spaces', 'compartments', 'warnings')}
-        meta['source_file'] = file.filename
+        meta['source_file'] = names[0] if len(names) == 1 else f"{names[0]} + {len(names) - 1} more"
+        meta['source_files'] = names
         meta['mapping'] = mapping
-        project = store.create(name, meta, to_codes(result['grids']), ifc_path=path)
+        project = store.create(name, meta, to_codes(result['grids']), ifc_paths=paths)
         return {'project_id': project.id}
 
-    return jsonify({'job_id': jobs.start(work, 'Converting the IFC file')}), 202
+    return jsonify({'job_id': jobs.start(work, 'Converting the IFC file' if len(paths) == 1 else f'Converting {len(paths)} IFC files')}), 202
 
 
 @app.route('/api/jobs/<jid>', methods=['GET'])
@@ -534,9 +544,13 @@ def project_overrides(pid):
 
 @app.route('/api/projects/<pid>/analyse', methods=['POST'])
 def analyse_project(pid):
+    """Run the checks. With ?background=1 they run as a job with progress (poll /api/jobs/<id>; its result holds
+    the results), else the results come back directly."""
     project = project_or_404(pid)
     if not project:
         return not_found()
+    if request.args.get('background'):
+        return jsonify({'job_id': jobs.start(lambda progress: {'results': project.analyse(progress)}, 'Checking the routes')}), 202
     try:
         return jsonify(project.analyse())
     except Exception as e:
@@ -589,13 +603,19 @@ def export_project(pid, kind):
                         compartments=results['compartments'])
         return send_file(BytesIO(pdf), as_attachment=True, download_name=f"{base}_report_{lang}.pdf", mimetype='application/pdf')
     if kind == 'ifc':
-        ifc_path = project.meta.get('ifc_file')
-        if not ifc_path or not os.path.isfile(ifc_path):
-            return jsonify({'error': 'This project has no IFC file (it was loaded from a grid file): attach the IFC first'}), 400
-        out = os.path.join(project.directory, f"{base}_with_routes.ifc")
+        # a project of several files: ?file=<index> picks the one the routes are added to (default the first)
         m = project.meta
-        add_escape_routes_to_ifc(ifc_path, out, results['routes'], m['grid_size'], m['bbox'], m['floors'])
-        return send_file(out, as_attachment=True, download_name=f"{base}_with_routes.ifc")
+        ifc_paths = m.get('ifc_files') or ([m['ifc_file']] if m.get('ifc_file') else [])
+        index = int(request.args.get('file') or 0)
+        if not ifc_paths or not 0 <= index < len(ifc_paths) or not os.path.isfile(ifc_paths[index]):
+            return jsonify({'error': 'This project has no IFC file (it was loaded from a grid file): attach the IFC first'}), 400
+        names = m.get('source_files') or [m.get('source_file') or base]
+        target = os.path.splitext(secure_filename(names[index] if index < len(names) else base))[0] or base
+        out = os.path.join(project.directory, f"{target}_with_routes.ifc")
+        # each floor's storey in that file (a file without the storey gets the routes on its first storey)
+        floors = [{**f, 'guid': f['guids'][index] if index < len(f.get('guids') or []) else f.get('guid')} for f in m['floors']]
+        add_escape_routes_to_ifc(ifc_paths[index], out, results['routes'], m['grid_size'], m['bbox'], floors)
+        return send_file(out, as_attachment=True, download_name=f"{target}_with_routes.ifc")
     return jsonify({'error': f'Unknown export {kind}'}), 400
 
 

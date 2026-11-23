@@ -35,19 +35,20 @@ export const api = {
     exits: (id, exits) => request('POST', `/api/projects/${id}/exits`, { exits }),
     overrides: (id, body) => request('POST', `/api/projects/${id}/overrides`, body),
     analyse: id => request('POST', `/api/projects/${id}/analyse`),
+    analyseJob: id => request('POST', `/api/projects/${id}/analyse?background=1`),
     path: (id, start, goals) => request('POST', `/api/projects/${id}/path`, { start, goals }),
     attachIfc: (id, form) => request('POST', `/api/projects/${id}/ifc`, form),
-    exportUrl: (id, kind, lang) => `/api/projects/${id}/export/${kind}${lang ? `?lang=${lang}` : ''}`,
+    exportUrl: (id, kind, query) => `/api/projects/${id}/export/${kind}${query ? `?${new URLSearchParams(query)}` : ''}`,
 };
 
 // Poll a background job until it ends; onProgress(fraction, message).
-export async function waitForJob(jobId, onProgress) {
-    for (;;) {
+export async function waitForJob(jobId, onProgress, interval = 400) {
+    for (let wait = Math.min(interval, 150); ; wait = interval) {
+        await new Promise(r => setTimeout(r, wait));
         const job = await api.job(jobId);
         onProgress(job.progress || 0, job.message || '');
         if (job.status === 'done') return job.result;
         if (job.status === 'error') throw new Error(job.error || 'The job failed');
-        await new Promise(r => setTimeout(r, 400));
     }
 }
 
