@@ -600,8 +600,11 @@ def export_project(pid, kind):
     results = project.results or project.analyse()
     if kind == 'pdf':
         lang = request.args.get('lang') or project.settings.get('language', 'en')
-        pdf = build_pdf(project.routes_in(lang), project.meta['floors'], project.meta.get('source_file') or project.name, lang,
-                        compartments=results['compartments'])
+        m = project.meta
+        plans = {'codes': project.codes, 'grid_size': m['grid_size'], 'bbox': m['bbox'], 'spaces': results['spaces'],
+                 'exits': [e['cell'] for e in results['exits']]}
+        pdf = build_pdf(project.routes_in(lang), m['floors'], m.get('source_file') or project.name, lang,
+                        compartments=results['compartments'], plans=plans)
         return send_file(BytesIO(pdf), as_attachment=True, download_name=f"{base}_report_{lang}.pdf", mimetype='application/pdf')
     if kind == 'ifc':
         # a project of several files: ?file=<index> picks the one the routes are added to (default the first)

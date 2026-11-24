@@ -413,6 +413,19 @@ def test_api_routes_and_report(client):
     assert packed.status_code == 200 and isinstance(packed.get_json()['buffered_grids'][0][0], str)
 
 
+def test_floor_plan_is_cropped_and_keeps_walls_when_shrunk():
+    from report import FloorPlan
+    codes = np.zeros((500, 6200), dtype=np.uint8)
+    codes[200:300, 1000:6000] = 1
+    codes[250, 1000:6000] = 2                              # a wall one cell thick
+    plan = FloorPlan(codes, 0, [], [], [], GS, {'min_x': 0, 'min_y': 0}, 'Helvetica')
+    assert plan.landscape and plan.r0 > 0 and plan.c0 > 0 and plan.c1 < 6200   # cropped to the floor
+    img, k = plan.image()
+    assert k == 3                                          # 5200 columns shrunk to blocks of 3 cells
+    small = np.asarray(img)
+    assert (small == (14, 14, 14)).all(axis=2).any()       # the wall is still drawn
+
+
 # ------------------------------------------------------- IFC (example files)
 
 DUPLEX = os.path.join(ROOT, 'ExampleInputs', 'Duplex.ifc')
@@ -527,8 +540,9 @@ def test_project_lifecycle(client, project_dir):
     assert route['use'] == 'night' and route['use_source'] == 'set'
 
     assert 'buffered' in client.post(f'/api/projects/{pid}/settings', json={'wall_buffer': 3}).get_json()
-    assert client.get(f'/api/projects/{pid}/export/pdf?lang=fr').status_code == 200
-    grid = client.get(f'/api/projects/{pid}/export/grid')
+    pdf = client.get(f'/api/projects/{pid}/export/pdf?lang=fr')
+    assert pdf.status_code == 200 and b'/Subtype /Image' in pdf.data     # the plan of the floor with its routes
+    grid =client.get(f'/api/projects/{pid}/export/grid')
     assert grid.status_code == 200 and _json.loads(grid.data)['settings']['wall_buffer'] == 3
     assert client.get(f'/api/projects/{pid}/export/ifc').status_code == 400   # no IFC behind a grid file
 

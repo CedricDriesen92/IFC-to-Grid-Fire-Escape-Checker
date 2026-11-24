@@ -80,6 +80,12 @@ MESSAGES = {
     'stairwell door': {'en': "stairwell door", 'nl': "deur trappenhuis", 'fr': "porte de cage d'escalier"},
     'evacuation route': {'en': "evacuation route", 'nl': "evacuatieweg", 'fr': "chemin d'évacuation"},
     'exit': {'en': "exit", 'nl': "uitgang", 'fr': "sortie"},
+    'legend_ok': {'en': "route OK", 'nl': "route in orde", 'fr': "chemin conforme"},
+    'legend_problem': {'en': "route with a problem", 'nl': "route met een probleem", 'fr': "chemin non conforme"},
+    'legend_night': {'en': "problem at night only", 'nl': "enkel 's nachts een probleem", 'fr': "non conforme la nuit seulement"},
+    'legend_second': {'en': "route to a second exit", 'nl': "route naar een tweede uitgang", 'fr': "chemin vers une deuxième sortie"},
+    'legend_exit': {'en': "exit", 'nl': "uitgang", 'fr': "sortie"},
+    'legend_furthest': {'en': "furthest point of a space", 'nl': "verste punt van een ruimte", 'fr': "point le plus éloigné d'un local"},
 }
 
 NOT_CHECKED = {
