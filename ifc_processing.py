@@ -11,7 +11,7 @@ import math
 import multiprocessing
 import numpy as np
 from scipy.spatial import ConvexHull
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Dict, List, Tuple, Any, Optional
 import traceback
 import logging
@@ -44,6 +44,19 @@ MAX_GRID_CELLS = 60_000_000
 NIGHT_USE_WORDS = re.compile(r"bed ?room|sleep|slaap|chambre|dortoir|night|nacht|nuit|miegam|hotel ?room", re.IGNORECASE)
 # OccupancyType values for night use (annex 1, 1.16), compared folded as in Rule Gen (D17); every other value is day use.
 NIGHT_OCCUPANCY_VALUES = {'night occupancy', 'nachtbezetting', 'occupation de nuit', 'occupation nocturne'}
+# Free-text occupancy properties of authoring tools (Revit's room parameter "Occupancy", for one), read when the
+# standard OccupancyType is missing. Their values are matched by words: sleeping or dependent occupants are night
+# use (the stricter limits), an evacuation route or escape stair marks the space as FireExit, anything else is day use.
+OCCUPANCY_PROPERTY_NAMES = {'occupancy', 'occupancy type', 'occupancytype', 'bezetting', 'bezettingstype', 'occupation',
+                            'type d occupation'}
+NIGHT_OCCUPANCY_WORDS = re.compile(r"night|nacht|nuit|sleep|slaap|slapend|dorm|dependent|afhankelijk|zorgbehoevend|"
+                                   r"d[ée]pendant", re.IGNORECASE)
+FIRE_EXIT_OCCUPANCY_WORDS = re.compile(r"evacuation ?route|escape ?(route|stair)|fire ?escape|evacuatie ?weg|vlucht ?weg|"
+                                       r"vlucht ?trap|evacuatie ?trap|chemin d.?[ée]vacuation|escalier de secours",
+                                       re.IGNORECASE)
+# Space properties that name the fire compartment a space belongs to, for models without compartment zones.
+COMPARTMENT_PROPERTY_NAMES = {'compartment', 'fire compartment', 'firecompartment', 'compartment name',
+                              'brandcompartiment', 'compartiment', 'compartiment feu', 'compartiment incendie'}
 
 
 def fold(text: Any) -> str:
@@ -208,21 +221,41 @@ def cells_overlapping_triangles(tris: np.ndarray, shape: Tuple[int, int], eps: f
     return linear // shape[1], linear % shape[1]
 
 
+def text_property(psets: Dict[str, Dict[str, Any]], names: set) -> Optional[str]:
+    """The first non-empty text value of a property whose folded name is one of names, in any property set."""
+    for props in psets.values():
+        for key, value in props.items():
+            if key != 'id' and fold(key) in names and isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 def space_properties(space, label: str) -> Dict[str, Any]:
     """Use (day or night), occupancy and FireExit of an IfcSpace, from its property sets, else guessed from its name.
 
     Pset_SpaceOccupancyRequirements gives OccupancyType and OccupancyNumber: "Night occupancy" is night use, any other
-    value day use (as Rule Gen reads it, D17); without a value, a name such as "bedroom" suggests night use. FireExit
-    is in Pset_SpaceFireSafetyRequirements (IFC4) or Pset_SpaceCommon (IFC2x3)."""
+    value day use (as Rule Gen reads it, D17). Without it, a free-text occupancy property (OCCUPANCY_PROPERTY_NAMES,
+    such as Revit's "Occupancy") is read by its words; without either, a name such as "bedroom" suggests night use.
+    FireExit is in Pset_SpaceFireSafetyRequirements (IFC4) or Pset_SpaceCommon (IFC2x3), or follows from an
+    occupancy value such as "Protected evacuation route"."""
     psets = ifcopenshell.util.element.get_psets(space)
     occupancy = psets.get('Pset_SpaceOccupancyRequirements', {})
     fire = psets.get('Pset_SpaceFireSafetyRequirements', {})
     common = psets.get('Pset_SpaceCommon', {})
     fire_exit = fire.get('FireExit', common.get('FireExit'))
     occupancy_type = occupancy.get('OccupancyType') or ''
+    other_type = None if occupancy_type else text_property(psets, OCCUPANCY_PROPERTY_NAMES)
     use, use_source = None, None
     if occupancy_type:
         use, use_source = ('night' if fold(occupancy_type) in NIGHT_OCCUPANCY_VALUES else 'day'), 'ifc'
+    elif other_type and FIRE_EXIT_OCCUPANCY_WORDS.search(other_type):
+        if fire_exit is None:
+            fire_exit = True
+        if NIGHT_USE_WORDS.search(label):
+            use, use_source = 'night', 'name'
+    elif other_type:
+        night = fold(other_type) in NIGHT_OCCUPANCY_VALUES or NIGHT_OCCUPANCY_WORDS.search(other_type)
+        use, use_source = ('night' if night else 'day'), 'ifc'
     elif NIGHT_USE_WORDS.search(label):
         use, use_source = 'night', 'name'
     return {'use': use, 'use_source': use_source, 'occupancy': occupancy.get('OccupancyNumber'),
@@ -615,8 +648,9 @@ class IFCProcessor:
 
     def extract_compartments(self) -> None:
         """Fire compartments as groups of IfcSpaces: IfcSpatialZones (IFC4) and IfcZones that are marked as fire
-        safety zones or named as compartments. Without them, each floor counts as one compartment (LG 2.1: a
-        compartment is one storey high)."""
+        safety zones or named as compartments. Without such zones, a space property naming the compartment
+        (COMPARTMENT_PROPERTY_NAMES, such as a Revit room parameter "Compartment") groups the spaces. Spaces in
+        neither count per floor, one compartment each (LG 2.1: a compartment is one storey high)."""
         found = {}
         pattern = re.compile(r"compart|brandcomp|brand ?zone|fire ?zone|fire ?safety|gaisr", re.IGNORECASE)
 
@@ -645,6 +679,15 @@ class IFCProcessor:
                     occupancy = ifcopenshell.util.element.get_psets(zone).get('Pset_ZoneCommon', {}).get('OccupancyNumber')
                     found[zone.GlobalId] = {'id': zone.GlobalId, 'name': zone.Name or zone.GlobalId,
                                             'spaces': sorted(spaces), 'occupancy': occupancy}
+        if not found:
+            by_value: Dict[str, set] = defaultdict(set)
+            for _, space in self.space_elements:
+                value = text_property(ifcopenshell.util.element.get_psets(space), COMPARTMENT_PROPERTY_NAMES)
+                if value:
+                    by_value[value].add(space.GlobalId)
+            for value, spaces in sorted(by_value.items()):
+                found[f"property:{value}"] = {'id': f"property:{value}", 'name': value, 'spaces': sorted(spaces),
+                                              'occupancy': None}
         self.compartments = list(found.values())
 
     def record_door(self, door, floor_index: int, cells: List[int]) -> None:

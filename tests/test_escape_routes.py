@@ -587,6 +587,46 @@ def test_occupancy_type_follows_rule_gen_d17():
     assert fold('Night occupancies') not in NIGHT_OCCUPANCY_VALUES and fold('Office') not in NIGHT_OCCUPANCY_VALUES
 
 
+def revit_style_spaces(values):
+    """An IFC4 model with one IfcSpace per (name, {property: value}) in a Revit-style "Identity Data" set."""
+    import ifcopenshell
+    import ifcopenshell.api
+    model = ifcopenshell.file(schema='IFC4')
+    ifcopenshell.api.run('root.create_entity', model, ifc_class='IfcProject')
+    spaces = []
+    for name, props in values:
+        space = ifcopenshell.api.run('root.create_entity', model, ifc_class='IfcSpace', name=name)
+        pset = ifcopenshell.api.run('pset.add_pset', model, product=space, name='Identity Data')
+        ifcopenshell.api.run('pset.edit_pset', model, pset=pset, properties=props)
+        spaces.append(space)
+    return model, spaces
+
+
+def test_free_text_occupancy_gives_use_and_evacuation_routes():
+    # Revit's room parameter "Occupancy" as in the Kortrijk model: Awake, Dependent, Sleeping, and evacuation spaces.
+    from ifc_processing import space_properties
+    _, spaces = revit_style_spaces([
+        ('Room', {'Occupancy': 'Dependent'}), ('Room', {'Occupancy': 'Sleeping'}), ('Staff', {'Occupancy': 'Awake'}),
+        ('Corridor', {'Occupancy': 'Protected evacuation route'}), ('Stairwell', {'Occupancy': 'Vluchttrap'}),
+        ('Bedroom', {})])
+    props = [space_properties(s, s.Name) for s in spaces]
+    assert [(p['use'], p['use_source'], p['fire_exit']) for p in props] == [
+        ('night', 'ifc', None), ('night', 'ifc', None), ('day', 'ifc', None),
+        (None, None, True), (None, None, True), ('night', 'name', None)]
+
+
+def test_compartments_from_a_space_property_when_there_are_no_zones():
+    model, spaces = revit_style_spaces([('A', {'Compartment': 'Compartment 1'}), ('B', {'Compartment': 'Compartment 1'}),
+                                        ('C', {'Compartment': 'Compartment 2'}), ('D', {})])
+    proc = IFCProcessor('unused', GS)
+    proc.ifc_file = model
+    proc.space_elements = [(0, s) for s in spaces]
+    proc.extract_compartments()
+    found = {c['name']: c['spaces'] for c in proc.compartments}
+    assert found == {'Compartment 1': sorted([spaces[0].GlobalId, spaces[1].GlobalId]),
+                     'Compartment 2': [spaces[2].GlobalId]}
+
+
 def test_project_paths_exits_floors_and_attached_ifc(client, project_dir):
     import json as _json
     import app as app_module
